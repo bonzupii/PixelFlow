@@ -84,8 +84,8 @@ thread prints how many processed frames it dropped at shutdown.
 
 ## Input forwarding
 
-ScreenCast carries no input. This milestone does not forward
-keyboard, mouse, or controller input, and it does not install
+ScreenCast carries no input. PixelFlow does not forward
+keyboard, mouse, or controller input yet, and it does not install
 global input interception. Input forwarding is future work
 through the XDG RemoteDesktop portal and EIS/libei, which need
 their own permission from the user. Until that lands, the target
@@ -97,9 +97,9 @@ directly, and PixelFlow shows the processed copy.
 The build machine has no Wayland desktop, no compositor, no
 portal, no PipeWire daemon, and no gtk-slashem. What was verified
 there: the full workspace builds (`cargo build --release` clean)
-and passes its tests (`cargo test --release`: 32 passed, 0
+and passes its tests (`cargo test --release`: 48 passed, 0
 failed: 8 CLI, 3 core, 5 presentation, 1 processing unit test, 3
-regression, 12 Wayland). The format conversion and stride
+regression, 12 Wayland, 16 synthetic). The format conversion and stride
 handling pass unit tests, the letterbox math passes unit tests,
 the CLI parses the `run` command, and the portal and PipeWire
 error paths fail fast with typed errors instead of hanging or

@@ -72,6 +72,7 @@ jobs:
       # No PIXELFLOW_FIXTURES_DIR is set here on purpose: the regression
       # tests compare against copyrighted game screenshots that are never
       # committed, so they skip without fixtures. That is the expected CI
-      # behavior. The 48 fixture-free tests still run.
+      # behavior. The 46 fixture-free tests still run; the 2 fixture
+      # regression tests skip.
       - run: cargo build --release
       - run: cargo test --release
