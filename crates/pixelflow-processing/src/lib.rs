@@ -8,4 +8,4 @@
 pub mod algorithms;
 
 pub use algorithms::nearest::Nearest;
-pub use algorithms::upscale20::Upscale20;
+pub use algorithms::edgeflow::EdgeFlow;

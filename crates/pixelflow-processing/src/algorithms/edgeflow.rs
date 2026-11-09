@@ -20,7 +20,7 @@
     clippy::unreadable_literal
 )]
 //! The code below is the standalone Rust port from
-//! `upscale20/src/main.rs`, moved here verbatim: the mathematical
+//! `edgeflow/src/main.rs`, moved here verbatim: the mathematical
 //! operations, float widths, gates, and the hardcoded Savitzky-Golay
 //! kernel tables (numpy pinv values) are unchanged, so its output is
 //! identical to the standalone program. Do not simplify, redesign, or
@@ -28,8 +28,8 @@
 //! the original program was the `png` crate, and that lives in the
 //! CLI now; this module is pure std plus pixelflow-core types.
 //!
-//! Testing switches, kept from the port: `UPSCALE20_NO_FOLLOW=1`
-//! skips the edge follower (12 only); `UPSCALE20_DEBUG_RUNS=1`
+//! Testing switches, kept from the port: `EDGEFLOW_NO_FOLLOW=1`
+//! skips the edge follower (12 only); `EDGEFLOW_DEBUG_RUNS=1`
 //! prints each accepted run to stderr.
 
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
@@ -970,7 +970,7 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
             if ok.iter().filter(|b| **b).count() < min_len {
                 continue;
             }
-            if std::env::var("UPSCALE20_DEBUG_RUNS").is_ok() {
+            if std::env::var("EDGEFLOW_DEBUG_RUNS").is_ok() {
                 eprintln!(
                     "run t {}..{} len {} v {:.2}..{:.2} rms {:.3} ok {}",
                     t[0],
@@ -1189,10 +1189,10 @@ fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
 }
 
 /// 20: 12 combined, then `edge_follow2`. No dither source anywhere.
-/// `UPSCALE20_NO_FOLLOW`=1 skips the follower (12 only), for testing.
+/// `EDGEFLOW_NO_FOLLOW`=1 skips the follower (12 only), for testing.
 fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
     let base = combined(a, s);
-    if std::env::var("UPSCALE20_NO_FOLLOW").is_ok() {
+    if std::env::var("EDGEFLOW_NO_FOLLOW").is_ok() {
         return (base, Stats { h_runs: 0, v_runs: 0, h_len: 0, v_len: 0, touched_frac: 0.0 });
     }
     edge_follow2(&base, a, s)
@@ -1202,11 +1202,11 @@ fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
 /// Algorithm 20 as a [`Processor`]: 12 (combined) + `edge_follow2`, no
 /// dither source anywhere. Input must be RGB8; output is RGB8 at
 /// `width * scale` by `height * scale`.
-pub struct Upscale20;
+pub struct EdgeFlow;
 
-impl Processor for Upscale20 {
+impl Processor for EdgeFlow {
     fn name(&self) -> &'static str {
-        "upscale20"
+        "edgeflow"
     }
 
     fn supported_scales(&self) -> &[u32] {
@@ -1215,17 +1215,17 @@ impl Processor for Upscale20 {
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
-            return Err(ProcessError::UnsupportedScale { algorithm: "upscale20", scale });
+            return Err(ProcessError::UnsupportedScale { algorithm: "edgeflow", scale });
         }
         if frame.format != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
-                algorithm: "upscale20",
+                algorithm: "edgeflow",
                 format: frame.format.to_string(),
             });
         }
         let src = UImg { w: frame.width as usize, h: frame.height as usize, d: frame.data.clone() };
         let (out, stats) = clean_base_edge(&src, scale as usize);
-        if std::env::var("UPSCALE20_DEBUG_RUNS").is_ok() {
+        if std::env::var("EDGEFLOW_DEBUG_RUNS").is_ok() {
             eprintln!(
                 "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
                 stats.h_runs, stats.h_len, stats.v_runs, stats.v_len, stats.touched_frac * 100.0
