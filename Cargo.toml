@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pixelflow-core",
+    "crates/pixelflow-processing",
+    "crates/pixelflow-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "UNDECIDED"
+authors = ["Bonzupii"]
+
+[workspace.dependencies]
+pixelflow-core = { path = "crates/pixelflow-core" }
+pixelflow-processing = { path = "crates/pixelflow-processing" }
+clap = { version = "4", features = ["derive"] }
+png = "0.17"

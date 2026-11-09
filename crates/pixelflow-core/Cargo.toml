@@ -1,0 +1,7 @@
+[package]
+name = "pixelflow-core"
+version = "0.1.0"
+edition = "2021"
+description = "PixelFlow core: frame representation, pixel formats, processing pipeline interface"
+
+[dependencies]
