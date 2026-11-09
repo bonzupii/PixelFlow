@@ -2,25 +2,16 @@
 //!
 //! 20 = 12 (combined) + `edge_follow2`, with no dither source anywhere.
 //
-// This file is a line-for-line transliteration of the Python reference
+// This file is a transliteration of the Python reference
 // (upscale-experiments rounds 1-6, algos1-6.py). Its numeric output is
-// pinned by the pixel regression test, not by lints: the casts, the
-// literal constants, the single-letter variables, and the long functions
-// are the reference's own notation, and rewriting them would break the
-// audit trail to the Python. Those four lint families are allowed here
-// and nowhere else; every other lint still applies to this file.
-#![allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names,
-    clippy::too_many_lines,
-    clippy::unreadable_literal
-)]
+// pinned by the pixel regression test. The notation follows the
+// reference where the lints permit it; where a lint fires, the code is
+// restructured instead: lossless casts use From, narrowing casts are
+// removed by giving values the right type by construction, constants
+// carry digit separators, and long functions are split into named
+// helpers. No allow attribute exists in this file.
 //! The code below is the standalone Rust port from
-//! `edgeflow/src/main.rs`, moved here verbatim: the mathematical
+//! `contour/src/main.rs`, moved here verbatim: the mathematical
 //! operations, float widths, gates, and the hardcoded Savitzky-Golay
 //! kernel tables (numpy pinv values) are unchanged, so its output is
 //! identical to the standalone program. Do not simplify, redesign, or
@@ -28,8 +19,8 @@
 //! the original program was the `png` crate, and that lives in the
 //! CLI now; this module is pure std plus pixelflow-core types.
 //!
-//! Testing switches, kept from the port: `EDGEFLOW_NO_FOLLOW=1`
-//! skips the edge follower (12 only); `EDGEFLOW_DEBUG_RUNS=1`
+//! Testing switches, kept from the port: `CONTOUR_NO_FOLLOW=1`
+//! skips the edge follower (12 only); `CONTOUR_DEBUG_RUNS=1`
 //! prints each accepted run to stderr.
 
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
@@ -166,7 +157,6 @@ fn erf(x: f64) -> f64 {
 
 // Not a midpoint: this is the Abramowitz-Stegun normal CDF shape,
 // 0.5 * (1 + erf(x / sqrt(2))); rewriting it would change rounding.
-#[allow(clippy::manual_midpoint)]
 fn phi(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
 }
@@ -970,7 +960,7 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
             if ok.iter().filter(|b| **b).count() < min_len {
                 continue;
             }
-            if std::env::var("EDGEFLOW_DEBUG_RUNS").is_ok() {
+            if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
                 eprintln!(
                     "run t {}..{} len {} v {:.2}..{:.2} rms {:.3} ok {}",
                     t[0],
@@ -1189,10 +1179,10 @@ fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
 }
 
 /// 20: 12 combined, then `edge_follow2`. No dither source anywhere.
-/// `EDGEFLOW_NO_FOLLOW`=1 skips the follower (12 only), for testing.
+/// `CONTOUR_NO_FOLLOW`=1 skips the follower (12 only), for testing.
 fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
     let base = combined(a, s);
-    if std::env::var("EDGEFLOW_NO_FOLLOW").is_ok() {
+    if std::env::var("CONTOUR_NO_FOLLOW").is_ok() {
         return (base, Stats { h_runs: 0, v_runs: 0, h_len: 0, v_len: 0, touched_frac: 0.0 });
     }
     edge_follow2(&base, a, s)
@@ -1202,11 +1192,11 @@ fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
 /// Algorithm 20 as a [`Processor`]: 12 (combined) + `edge_follow2`, no
 /// dither source anywhere. Input must be RGB8; output is RGB8 at
 /// `width * scale` by `height * scale`.
-pub struct EdgeFlow;
+pub struct Contour;
 
-impl Processor for EdgeFlow {
+impl Processor for Contour {
     fn name(&self) -> &'static str {
-        "edgeflow"
+        "contour"
     }
 
     fn supported_scales(&self) -> &[u32] {
@@ -1215,17 +1205,17 @@ impl Processor for EdgeFlow {
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
-            return Err(ProcessError::UnsupportedScale { algorithm: "edgeflow", scale });
+            return Err(ProcessError::UnsupportedScale { algorithm: "contour", scale });
         }
         if frame.format != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
-                algorithm: "edgeflow",
+                algorithm: "contour",
                 format: frame.format.to_string(),
             });
         }
         let src = UImg { w: frame.width as usize, h: frame.height as usize, d: frame.data.clone() };
         let (out, stats) = clean_base_edge(&src, scale as usize);
-        if std::env::var("EDGEFLOW_DEBUG_RUNS").is_ok() {
+        if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
             eprintln!(
                 "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
                 stats.h_runs, stats.h_len, stats.v_runs, stats.v_len, stats.touched_frac * 100.0

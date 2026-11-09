@@ -8,4 +8,4 @@
 pub mod algorithms;
 
 pub use algorithms::nearest::Nearest;
-pub use algorithms::edgeflow::EdgeFlow;
+pub use algorithms::contour::Contour;

@@ -6,7 +6,7 @@
 pixelflow-core          frame, pixel format, Processor trait
        ^                     (no platform code, no I/O, no deps)
        |
-pixelflow-processing    algorithms: edgeflow, nearest
+pixelflow-processing    algorithms: contour, nearest
        ^                     (depends on core only)
        |
 pixelflow-cli           pixelflow binary: PNG I/O, clap CLI
@@ -50,17 +50,17 @@ algorithm.
 ## Processing: algorithm 20
 
 `pixelflow-processing` holds one module per algorithm under
-`src/algorithms/`. `edgeflow.rs` is the standalone Rust port
+`src/algorithms/`. `contour.rs` is the standalone Rust port
 moved in verbatim: the algorithm body (1,163 lines, from the
 image helpers through `clean_base_edge`) is byte-identical to
-`edgeflow/src/main.rs`. Only three things changed around it:
+`contour/src/main.rs`. Only three things changed around it:
 
 1. The PNG I/O and `main()` were removed; the CLI owns I/O now.
-2. A `Processor` adapter (`EdgeFlow`) was appended, converting
+2. A `Processor` adapter (`Contour`) was appended, converting
    `Frame` to the algorithm's internal image types and back.
 3. The dead `use std::env;` import was removed, and the follower
    statistics (which the standalone program printed) are now
-   reported on stderr only when `EDGEFLOW_DEBUG_RUNS=1` is set,
+   reported on stderr only when `CONTOUR_DEBUG_RUNS=1` is set,
    which also silences the dead-code warning those fields earned
    in a library.
 
@@ -80,8 +80,8 @@ different noise sign and flips the gate on 14 samples of one
 long Mario run. The tables are the port, not a detail.
 
 The algorithm's own test switches survive the move:
-`EDGEFLOW_NO_FOLLOW=1` skips the edge follower (12 only);
-`EDGEFLOW_DEBUG_RUNS=1` prints each accepted run and the run
+`CONTOUR_NO_FOLLOW=1` skips the edge follower (12 only);
+`CONTOUR_DEBUG_RUNS=1` prints each accepted run and the run
 statistics to stderr.
 
 ## CLI
@@ -102,7 +102,7 @@ Milestone 2 builds the launcher and the first capture backend.
   image-regression gate: with fixtures supplied locally (see
   `PIXELFLOW_FIXTURES_DIR` in the test file; the images are
   copyrighted game screenshots and are never committed), it
-  processes the six fixtures in `inputs/` at 4x with edgeflow
+  processes the six fixtures in `inputs/` at 4x with contour
   and compares pixel-for-pixel against `expected/`, the Python
   reference outputs from the upscaler experiments (round 6).
   Limits: max abs diff <= 1, except mario (at most 10 pixels

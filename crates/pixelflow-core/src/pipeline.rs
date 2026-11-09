@@ -7,10 +7,10 @@
 
 use crate::frame::Frame;
 
-/// An image processing algorithm: nearest neighbour, edgeflow, and
+/// An image processing algorithm: nearest neighbour, contour, and
 /// whatever comes later all implement this trait.
 pub trait Processor {
-    /// Short stable name, e.g. "edgeflow" or "nearest". Used in
+    /// Short stable name, e.g. "contour" or "nearest". Used in
     /// configuration and in CLI output.
     fn name(&self) -> &'static str;
 
