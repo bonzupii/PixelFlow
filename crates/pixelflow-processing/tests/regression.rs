@@ -1,23 +1,21 @@
-//! Regression tests for the upscale20 port: process the six native
+//! Regression tests for the contour port: process the six native
 //! test images at 4x and compare pixel-for-pixel against the Python
 //! reference outputs from the upscaler experiments (round 6).
 //!
 //! The fixture images are copyrighted game screenshots and live
-//! outside this repo. Point PIXELFLOW_FIXTURES_DIR at a local copy
+//! outside this repo. Point `PIXELFLOW_FIXTURES_DIR` at a local copy
 //! to run these tests; without fixtures they skip.
 //!
 //! Limits, from the standalone port's verified numbers
-//! (upscale20/README.md): max abs diff must be <= 1 (rounding),
+//! (contour/README.md): max abs diff must be <= 1 (rounding),
 //! except mario, where at most 10 pixels may differ by up to 34:
 //! at the right end of mario's long hill-boundary runs a horizontal
 //! and a vertical run compete for the same pixel and the winner is a
 //! float comparison at a near-tie. That is the reference port's own
 //! behaviour, not a regression in this crate.
 
-// Test code may unwrap and panic: these are test helpers, not library code.
-#![allow(clippy::unwrap_used, clippy::panic)]
 use pixelflow_core::{Frame, PixelFormat, Processor};
-use pixelflow_processing::{Nearest, Upscale20};
+use pixelflow_processing::{Nearest, Contour};
 use std::path::PathBuf;
 
 fn fixtures_dir() -> PathBuf {
@@ -29,7 +27,7 @@ fn fixtures_dir() -> PathBuf {
 
 /// True when the fixture images are present. They are copyrighted
 /// game screenshots and are never committed to the repo; a developer
-/// supplies them locally (PIXELFLOW_FIXTURES_DIR) to run the
+/// supplies them locally (`PIXELFLOW_FIXTURES_DIR`) to run the
 /// regression tests, otherwise the tests skip.
 fn fixtures_present(dir: &PathBuf) -> bool {
     dir.join("inputs").join("mario.png").is_file()
@@ -38,16 +36,19 @@ fn fixtures_present(dir: &PathBuf) -> bool {
 
 /// Minimal PNG loader for the tests (RGB8 out; indexed/RGBA/grey
 /// inputs are expanded by the decoder, alpha dropped).
-fn load_png(path: &PathBuf) -> Frame {
-    let file = std::fs::File::open(path).unwrap();
+fn load_png(path: &PathBuf) -> Result<Frame, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().unwrap();
+    let mut reader = decoder.read_info().map_err(|e| format!("png header {}: {e}", path.display()))?;
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     let (color_type, _) = reader.output_color_type();
-    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
-    let frame = reader.next_frame(&mut buf).unwrap();
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("png size unknown: {}", path.display()))?;
+    let mut buf = vec![0u8; size];
+    let frame = reader.next_frame(&mut buf).map_err(|e| format!("png decode {}: {e}", path.display()))?;
     let bytes = &buf[..frame.buffer_size()];
     let mut data = vec![0u8; w as usize * h as usize * 3];
     match color_type {
@@ -73,9 +74,11 @@ fn load_png(path: &PathBuf) -> Frame {
                 data[i * 3 + 2] = bytes[i * 2];
             }
         }
-        png::ColorType::Indexed => panic!("indexed PNG survived expansion: {}", path.display()),
+        png::ColorType::Indexed => {
+            return Err(format!("indexed PNG survived expansion: {}", path.display()));
+        }
     }
-    Frame::new(w, h, PixelFormat::Rgb8, data).unwrap()
+    Frame::new(w, h, PixelFormat::Rgb8, data).map_err(|e| e.to_string())
 }
 
 /// Max abs channel difference and the count of pixels differing by
@@ -100,17 +103,17 @@ fn compare(a: &Frame, b: &Frame) -> (u8, usize) {
 }
 
 #[test]
-fn upscale20_matches_python_reference_at_4x() {
+fn contour_matches_python_reference_at_4x() -> Result<(), String> {
     let dir = fixtures_dir();
     if !fixtures_present(&dir) {
         println!("fixtures not present, skipping regression test");
-        return;
+        return Ok(());
     }
-    let algo = Upscale20;
+    let algo = Contour;
     for name in ["ct", "eb", "ct2", "zelda", "mario", "ctnew"] {
-        let input = load_png(&dir.join("inputs").join(format!("{name}.png")));
-        let expected = load_png(&dir.join("expected").join(format!("{name}_20_clean_base.png")));
-        let out = algo.process(&input, 4).unwrap();
+        let input = load_png(&dir.join("inputs").join(format!("{name}.png")))?;
+        let expected = load_png(&dir.join("expected").join(format!("{name}_20_clean_base.png")))?;
+        let out = algo.process(&input, 4).map_err(|e| e.to_string())?;
         assert_eq!((out.width, out.height), (expected.width, expected.height), "{name}: size");
         let (max, over_one) = compare(&out, &expected);
         if name == "mario" {
@@ -122,27 +125,30 @@ fn upscale20_matches_python_reference_at_4x() {
         }
         println!("{name}: max abs diff {max}, pixels differing by >1: {over_one}");
     }
+    Ok(())
 }
 
 #[test]
-fn upscale20_2x_dimensions() {
+fn contour_2x_dimensions() -> Result<(), String> {
     let dir = fixtures_dir();
     if !fixtures_present(&dir) {
         println!("fixtures not present, skipping 2x dimensions test");
-        return;
+        return Ok(());
     }
-    let input = load_png(&dir.join("inputs").join("mario.png"));
-    let out = Upscale20.process(&input, 2).unwrap();
+    let input = load_png(&dir.join("inputs").join("mario.png"))?;
+    let out = Contour.process(&input, 2).map_err(|e| e.to_string())?;
     assert_eq!((out.width, out.height), (512, 448));
+    Ok(())
 }
 
 #[test]
-fn nearest_sanity() {
-    let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).unwrap();
-    let out = Nearest.process(&f, 2).unwrap();
+fn nearest_sanity() -> Result<(), String> {
+    let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
+    let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
     assert_eq!((out.width, out.height), (4, 2));
     assert_eq!(out.pixel(0, 0), &[1, 2, 3]);
     assert_eq!(out.pixel(1, 0), &[1, 2, 3]);
     assert_eq!(out.pixel(2, 0), &[4, 5, 6]);
     assert_eq!(out.pixel(3, 1), &[4, 5, 6]);
+    Ok(())
 }

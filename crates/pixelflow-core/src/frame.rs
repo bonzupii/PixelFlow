@@ -118,7 +118,6 @@ impl Frame {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -137,10 +136,12 @@ mod tests {
     }
 
     #[test]
-    fn to_rgb8_drops_alpha_and_expands_grey() {
-        let rgba = Frame::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]).unwrap();
+    fn to_rgb8_drops_alpha_and_expands_grey() -> Result<(), String> {
+        let rgba =
+            Frame::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]).map_err(|e| e.to_string())?;
         assert_eq!(rgba.to_rgb8().data, vec![1, 2, 3]);
-        let grey = Frame::new(1, 1, PixelFormat::Gray8, vec![7]).unwrap();
+        let grey = Frame::new(1, 1, PixelFormat::Gray8, vec![7]).map_err(|e| e.to_string())?;
         assert_eq!(grey.to_rgb8().data, vec![7, 7, 7]);
+        Ok(())
     }
 }

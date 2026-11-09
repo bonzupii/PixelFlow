@@ -46,19 +46,20 @@ impl Processor for Nearest {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn repeats_each_pixel() {
-        let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).unwrap();
-        let out = Nearest.process(&f, 2).unwrap();
+    fn repeats_each_pixel() -> Result<(), String> {
+        let f =
+            Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
+        let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
         assert_eq!(out.width, 4);
         assert_eq!(out.height, 2);
         assert_eq!(out.pixel(0, 0), &[1, 2, 3]);
         assert_eq!(out.pixel(1, 0), &[1, 2, 3]);
         assert_eq!(out.pixel(2, 0), &[4, 5, 6]);
         assert_eq!(out.pixel(0, 1), &[1, 2, 3]);
+        Ok(())
     }
 }
