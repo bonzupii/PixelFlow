@@ -14,8 +14,6 @@
 //! skips the edge follower (12 only); `UPSCALE20_DEBUG_RUNS=1`
 //! prints each accepted run to stderr.
 
-use std::env;
-
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
 
 // ---------------------------------------------------------------- images
@@ -1207,7 +1205,13 @@ impl Processor for Upscale20 {
             });
         }
         let src = UImg { w: frame.width as usize, h: frame.height as usize, d: frame.data.clone() };
-        let (out, _stats) = clean_base_edge(&src, scale as usize);
+        let (out, stats) = clean_base_edge(&src, scale as usize);
+        if std::env::var("UPSCALE20_DEBUG_RUNS").is_ok() {
+            eprintln!(
+                "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
+                stats.h_runs, stats.h_len, stats.v_runs, stats.v_len, stats.touched_frac * 100.0
+            );
+        }
         Ok(Frame {
             width: out.w as u32,
             height: out.h as u32,
