@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # libpipewire-0.3-dev: pipewire-sys probes libpipewire-0.3 via system_deps
+          # libspa-0.2-dev: libspa-sys probes libspa-0.2 via system_deps
+          # libwayland-dev: wayland-sys probes wayland-client, wayland-cursor,
+          #   wayland-egl and wayland-server via pkg-config at build time
+          #   (nothing links against them; wayland-sys dlopens at runtime)
+          # libclang-dev: pipewire-sys and libspa-sys run bindgen
+          #   unconditionally in their build scripts, and bindgen needs libclang
+          # pkg-config: the pkg-config binary used by the system_deps and
+          #   pkg_config build-script probes
+          sudo apt-get install -y \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libwayland-dev \
+            libclang-dev \
+            pkg-config
+      - run: ./ci/clippy-gate.sh
+
+  build-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # libpipewire-0.3-dev: pipewire-sys probes libpipewire-0.3 via system_deps
+          # libspa-0.2-dev: libspa-sys probes libspa-0.2 via system_deps
+          # libwayland-dev: wayland-sys probes wayland-client, wayland-cursor,
+          #   wayland-egl and wayland-server via pkg-config at build time
+          #   (nothing links against them; wayland-sys dlopens at runtime)
+          # libclang-dev: pipewire-sys and libspa-sys run bindgen
+          #   unconditionally in their build scripts, and bindgen needs libclang
+          # pkg-config: the pkg-config binary used by the system_deps and
+          #   pkg_config build-script probes
+          sudo apt-get install -y \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libwayland-dev \
+            libclang-dev \
+            pkg-config
+      # No PIXELFLOW_FIXTURES_DIR is set here on purpose: the regression
+      # tests compare against copyrighted game screenshots that are never
+      # committed, so they skip without fixtures. That is the expected CI
+      # behavior. The 48 fixture-free tests still run.
+      - run: cargo build --release
+      - run: cargo test --release
