@@ -364,3 +364,77 @@ It should be extensible without being architecturally fragile, cross-platform wi
 The current repository is the starting point, not the design contract. Preserve what is valuable, replace what is inadequate, and build the product described here.
 
 **Take ownership of the entire engineering effort. Audit, design, implement, validate, and keep moving through the roadmap until PixelFlow is a genuinely usable product—not merely a convincing collection of Rust crates.**
+
+## 9. Incremental, region-aware processing
+
+Both are viable ideas, and they address different problems:
+
+1. Frame differencing is primarily a performance optimization. It avoids recomputing output for areas whose source pixels have not changed.
+2. Graphic-element detection is primarily a quality optimization. It lets PixelFlow process different kinds of visual content differently.
+
+I would consider both as architectural capabilities for PixelFlow, rather than bolt-on optimizations for Contour.
+
+### 9.1 Incremental processing and dirty regions
+
+The basic idea is to divide the captured frame into tiles, compare each tile with the previous frame, and mark changed tiles as dirty. Only dirty areas need to be recalculated.
+
+The important part is making this work across the entire processing pipeline, not merely detecting changed pixels at capture time.
+
+Each processing node should declare its spatial dependencies:
+
+- Pixel-local: A changed input pixel only affects the corresponding output pixel.
+- Neighborhood-dependent: An operation such as edge detection or convolution needs a surrounding region recalculated too.
+- Global: Operations using whole-frame statistics, such as global palette analysis, may require a complete recalculation.
+- Temporal: Operations that depend on previous frames need to maintain their own history and invalidation rules.
+
+Dirty regions can then propagate through the graph. If a 16×16 source tile changes, a neighborhood-dependent operation might invalidate a larger area around it. Unaffected cached output tiles can be reused.
+
+Ideally, capture backends provide damage-region information directly. When they don't, PixelFlow can calculate differences itself using tile comparisons. The comparison has a cost, of course, so profiling needs to establish when it actually saves time.
+
+One important detail: cache intermediate processing stages, not just the final image. Otherwise, an early change could force PixelFlow to redo expensive work in every subsequent stage.
+
+### 9.2 Region analysis and content-aware processing
+
+This is potentially more interesting for image quality. PixelFlow could analyze the source image and build a map describing what kind of content occupies different regions.
+
+Possible categories:
+
+| Region type            | Potential processing strategy                               |
+| ---------------------- | ----------------------------------------------------------- |
+| Text and UI            | Preserve thin strokes, sharp corners, and glyph consistency |
+| Sprites and characters | Contour-aware reconstruction, silhouette preservation       |
+| Flat backgrounds       | Preserve solid colors and avoid introducing gradients       |
+| Patterned backgrounds  | Detect and preserve repeating structures                    |
+| Gradients              | Avoid banding and preserve smooth transitions               |
+| Unknown or mixed       | Use the general-purpose processing path                     |
+
+The detector should use deterministic image analysis, not depend on manually tagging every asset. Useful features include palette size, color variance, edge density, connected components, contour geometry, repeated patterns, and local texture complexity.
+
+I would make this a separate region-analysis stage that produces metadata rather than having every algorithm independently attempt to recognize content. The processing graph can then use that metadata to route different regions through different algorithms or parameter sets, before compositing the results.
+
+There are some serious caveats. A sprite can look like a background element, text can be embedded in a sprite, and a flattened screenshot doesn't preserve the original layer structure. Classification will never be perfectly reliable. So the detector should produce confidence scores, preserve an `unknown` category, and support user-defined masks or overrides. Some temporal consistency is also important: a region shouldn't alternate between classifications every frame because of a few changed pixels.
+
+### 9.3 These ideas reinforce each other
+
+The particularly useful possibility is combining both systems:
+
+- Analyze only changed regions when updating the region map.
+- Reclassify regions only when their visual characteristics change sufficiently.
+- Reprocess only dirty regions through the relevant graph nodes.
+- Reuse cached intermediate results elsewhere.
+- Expand invalidation where neighboring pixels influence reconstruction.
+
+That gives you a framework that can potentially spend its processing budget where the image actually changed and where the most appropriate processing is needed.
+
+### 9.4 Implementation priority
+
+I'd pursue them in this order:
+
+1. Incremental execution: dirty-region detection, dependency propagation, and per-node tile caching. This has measurable performance benefits and will influence the processing architecture.
+2. Region analysis: segmentation, feature extraction, confidence scoring, and classification metadata.
+3. Content-aware routing: allow processing graphs to apply different routines to different regions, with sensible fallback behavior.
+4. Temporal stability: prevent classification flicker and unnecessary invalidation across frames.
+
+One architectural requirement I'd add now: processing nodes should explicitly declare whether they are local, neighborhood-dependent, global, or temporal. Retrofitting that after building a large collection of processors would be painful.
+
+I think both belong in the engineering mandate as substantial capabilities, not optional optimizations.
