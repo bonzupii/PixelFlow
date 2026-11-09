@@ -1,18 +1,20 @@
 //! PixelFlow command-line interface.
 //!
-//! Milestone 1 commands only: `upscale` (PNG in, PNG out),
-//! `backends`, and `info`. There is no `run` command yet; launching
-//! and capturing a live application is Milestone 2, and a stub that
-//! pretended to do it would be worse than no command at all.
+//! Commands: `upscale` (PNG in, PNG out), `run` (launch an
+//! application, capture its window, upscale each frame, present it),
+//! `backends`, and `info`.
 
+mod launcher;
 mod png_io;
+mod run;
 
 use clap::{Parser, Subcommand};
+use pixelflow_capture::SourceKind;
 use pixelflow_core::{ProcessError, Processor};
-use pixelflow_processing::{Nearest, Upscale20};
+use pixelflow_processing::{Nearest, Contour};
 use std::process::ExitCode;
 
-/// PixelFlow: cross-platform pixel-art upscaling wrapper (Milestone 1).
+/// PixelFlow: cross-platform pixel-art upscaling wrapper.
 #[derive(Parser)]
 #[command(name = "pixelflow", version, about)]
 struct Cli {
@@ -32,8 +34,29 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         scale: u32,
         /// Processing algorithm.
-        #[arg(long, default_value = "upscale20")]
+        #[arg(long, default_value = "contour")]
         algorithm: String,
+    },
+    /// Launch an application, capture its window, upscale each frame,
+    /// and present the result.
+    Run {
+        /// Program to launch.
+        program: String,
+        /// Arguments for the program.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// What to capture: window or monitor.
+        #[arg(long, value_parser = ["window", "monitor"], default_value = "window")]
+        capture: String,
+        /// Integer scale factor (2 or 4).
+        #[arg(long, default_value_t = 4)]
+        scale: u32,
+        /// Windowed preview instead of fullscreen.
+        #[arg(long, conflicts_with = "fullscreen")]
+        windowed: bool,
+        /// Fullscreen presentation.
+        #[arg(long)]
+        fullscreen: bool,
     },
     /// List available capture and presentation backends.
     Backends,
@@ -43,9 +66,9 @@ enum Command {
 
 fn algorithm(name: &str) -> Result<Box<dyn Processor>, String> {
     match name {
-        "upscale20" => Ok(Box::new(Upscale20)),
+        "contour" => Ok(Box::new(Contour)),
         "nearest" => Ok(Box::new(Nearest)),
-        other => Err(format!("unknown algorithm {other:?}; available: upscale20, nearest")),
+        other => Err(format!("unknown algorithm {other:?}; available: contour, nearest")),
     }
 }
 
@@ -66,11 +89,11 @@ fn run_upscale(input: &str, output: &str, scale: u32, algorithm_name: &str) -> R
 
 fn run_backends() {
     println!("capture backends:");
-    println!("  (none implemented yet — Milestone 2)");
+    println!("  wayland  XDG Desktop Portal ScreenCast + PipeWire (window or monitor)");
     println!("presentation backends:");
-    println!("  (none implemented yet — Milestone 3)");
+    println!("  wgpu     fullscreen borderless window, aspect-ratio preserving, vsync");
     println!("processing algorithms:");
-    println!("  upscale20  2x, 4x  (algorithm 20: gated merge, adaptive labelset, edge follower)");
+    println!("  contour  2x, 4x  (algorithm 20: gated merge, adaptive labelset, edge follower)");
     println!("  nearest    2x, 4x  (nearest-neighbour baseline)");
 }
 
@@ -81,9 +104,9 @@ fn run_info() {
         Ok(n) => println!("cpus: {n}"),
         Err(_) => println!("cpus: unknown"),
     }
-    println!("display: not probed yet (presentation is Milestone 3)");
-    println!("capture: not implemented yet (Milestone 2)");
-    println!("processing algorithms: upscale20, nearest");
+    println!("display: probed when the presentation window opens");
+    println!("capture: wayland (XDG Desktop Portal ScreenCast + PipeWire)");
+    println!("processing algorithms: contour, nearest");
 }
 
 fn main() -> ExitCode {
@@ -91,6 +114,19 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Command::Upscale { input, output, scale, algorithm } => {
             run_upscale(input, output, *scale, algorithm)
+        }
+        Command::Run { program, args, capture, scale, windowed, .. } => {
+            let source = match capture.as_str() {
+                "monitor" => SourceKind::Monitor,
+                _ => SourceKind::Window,
+            };
+            run::run(run::RunOptions {
+                program: program.clone(),
+                args: args.clone(),
+                source,
+                scale: *scale,
+                windowed: *windowed,
+            })
         }
         Command::Backends => {
             run_backends();
@@ -107,5 +143,70 @@ fn main() -> ExitCode {
             eprintln!("pixelflow: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The run command's fields, or empty values when the parsed
+    /// command is not `run`, so a wrong variant fails the asserts.
+    fn run_fields(cli: Cli) -> (String, Vec<String>, String, u32, bool, bool) {
+        match cli.command {
+            Command::Run { program, args, capture, scale, windowed, fullscreen } => {
+                (program, args, capture, scale, windowed, fullscreen)
+            }
+            _ => (String::new(), vec![], String::new(), 0, false, false),
+        }
+    }
+
+    #[test]
+    fn run_parses_program_and_flags() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from([
+            "pixelflow",
+            "run",
+            "gtk-slashem",
+            "--capture",
+            "monitor",
+            "--scale",
+            "2",
+            "--windowed",
+        ])?;
+        let (program, args, capture, scale, windowed, fullscreen) = run_fields(cli);
+        assert_eq!(program, "gtk-slashem");
+        assert!(args.is_empty());
+        assert_eq!(capture, "monitor");
+        assert_eq!(scale, 2);
+        assert!(windowed);
+        assert!(!fullscreen);
+        Ok(())
+    }
+
+    #[test]
+    fn run_passes_trailing_args_to_the_target() -> Result<(), clap::Error> {
+        let cli =
+            Cli::try_parse_from(["pixelflow", "run", "zsnes", "--", "-s", "game.smc"])?;
+        let (program, args, _, _, _, _) = run_fields(cli);
+        assert_eq!(program, "zsnes");
+        assert_eq!(args, vec!["-s".to_string(), "game.smc".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn windowed_and_fullscreen_conflict() {
+        let result =
+            Cli::try_parse_from(["pixelflow", "run", "x", "--windowed", "--fullscreen"]);
+        assert!(result.is_err(), "expected a conflict error");
+    }
+
+    #[test]
+    fn run_defaults_to_window_capture_at_4x() -> Result<(), clap::Error> {
+        let cli = Cli::try_parse_from(["pixelflow", "run", "x"])?;
+        let (_, _, capture, scale, windowed, _) = run_fields(cli);
+        assert_eq!(capture, "window");
+        assert_eq!(scale, 4);
+        assert!(!windowed);
+        Ok(())
     }
 }
