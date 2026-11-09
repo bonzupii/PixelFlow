@@ -37,6 +37,7 @@ missing_docs = "deny"
 [workspace.lints.clippy]
 all = "deny"
 pedantic = "deny"
+allow_attributes = "deny"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
