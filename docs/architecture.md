@@ -99,12 +99,14 @@ Milestone 2 builds the launcher and the first capture backend.
 - Unit tests live with the code they test (core frame
   construction, nearest-neighbour pixel repetition).
 - `pixelflow-processing/tests/regression.rs` is the
-  image-regression gate: it processes the six fixtures in
-  `tests/fixtures/inputs/` at 4x with upscale20 and compares
-  pixel-for-pixel against `tests/fixtures/expected/`, the Python
+  image-regression gate: with fixtures supplied locally (see
+  `PIXELFLOW_FIXTURES_DIR` in the test file; the images are
+  copyrighted game screenshots and are never committed), it
+  processes the six fixtures in `inputs/` at 4x with upscale20
+  and compares pixel-for-pixel against `expected/`, the Python
   reference outputs from the upscaler experiments (round 6).
   Limits: max abs diff <= 1, except mario (at most 10 pixels
   differing by more than 1, max diff 34), for the float-tie
   reason recorded in the README.
-- Fixtures are copies, not symlinks: the test must keep passing
-  even if the experiment directories move.
+- Fixtures are local-only: the test skips when they are absent,
+  so the suite stays green on a clean checkout.

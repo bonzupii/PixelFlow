@@ -27,8 +27,11 @@ PixelFlow exists.
   reconstruction. Its output is verified pixel-for-pixel against
   the Python reference outputs (see below).
 - **Regression tests.** The six native test images and their
-  reference outputs live in `tests/fixtures/`; `cargo test` checks
-  the 4x upscale of each one against its reference.
+  reference outputs are copyrighted game screenshots and are not
+  in this repo. Point `PIXELFLOW_FIXTURES_DIR` at a local copy
+  (an `inputs/` and an `expected/` directory) and `cargo test`
+  checks the 4x upscale of each one against its reference;
+  without fixtures the regression tests skip.
 - **CLI.** `pixelflow upscale <in.png> <out.png> [--scale 2|4]`,
   `pixelflow backends`, `pixelflow info`.
 
@@ -85,5 +88,4 @@ instead of listing backends that do not exist.
 
 ## License
 
-Undecided. No license file is included yet; the owner has not
-chosen one.
+Apache License 2.0. See `LICENSE`.
