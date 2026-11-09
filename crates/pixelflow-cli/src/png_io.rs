@@ -60,7 +60,9 @@ pub fn load_png(path: &str) -> Result<Frame, String> {
     Frame::new(w, h, PixelFormat::Rgb8, data).map_err(|e| e.to_string())
 }
 
-/// Save an RGB8 frame as a PNG file.
+/// Save an RGB8 frame as a PNG file. Rows are written one at a
+/// time through the frame's row accessor, so a strided frame saves
+/// its pixels, not its padding.
 pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
     if frame.format != PixelFormat::Rgb8 {
         return Err(format!("cannot save {} frames as PNG", frame.format));
@@ -71,8 +73,10 @@ pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header().map_err(|e| format!("png header: {e}"))?;
-    writer
-        .write_image_data(&frame.data)
-        .map_err(|e| format!("png write: {e}"))?;
+    for y in 0..frame.height {
+        writer
+            .write_image_data(frame.row(y))
+            .map_err(|e| format!("png write: {e}"))?;
+    }
     Ok(())
 }

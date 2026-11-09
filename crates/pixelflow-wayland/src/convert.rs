@@ -3,7 +3,10 @@
 //! The portal negotiates one of the packed RGB formats in
 //! `SUPPORTED_FORMATS`; planar formats are refused at negotiation and
 //! never reach this module. Conversion drops the alpha channel and
-//! copies rows honoring stride, so padded buffers convert correctly.
+//! writes RGB pixels at each row start, keeping the chunk stride:
+//! the frame's rows are `stride` bytes apart with the row padding
+//! zeroed, so the layout the compositor produced survives into the
+//! pipeline instead of being compacted away here.
 
 use crate::WaylandError;
 use pipewire::spa::param::video::VideoFormat;
@@ -40,13 +43,17 @@ fn channel_map(format: VideoFormat) -> Option<(usize, usize, usize, usize)> {
     }
 }
 
-/// Build an RGB8 frame from one packed plane.
+/// Build an RGB8 frame from one packed plane, keeping the chunk
+/// stride.
 ///
 /// `data` is the whole mapped buffer, `offset` is the chunk offset
 /// into it, and `stride` is the byte distance between row starts,
 /// which may exceed `width * bytes_per_pixel` when rows are padded.
 /// The buffer must hold every row the stride implies; a short buffer
-/// is an error, never a truncated read.
+/// is an error, never a truncated read. The returned frame's stride
+/// is the chunk stride: each row holds `width * 3` RGB bytes
+/// followed by zeroed padding, so stride-aware consumers read it
+/// directly and tight-only algorithms pack it at their entry point.
 ///
 /// # Errors
 ///
@@ -95,17 +102,18 @@ pub fn packed_to_frame(
             "buffer is {len} bytes, need {needed} for {width}x{height}"
         )));
     }
-    let mut out = Vec::with_capacity(width as usize * height as usize * 3);
+    let mut out = vec![0u8; height as usize * stride];
     for y in 0..height as usize {
         let row = start + y * stride;
+        let out_row = y * stride;
         for x in 0..width as usize {
             let px = row + x * bpp;
-            out.push(data[px + r]);
-            out.push(data[px + g]);
-            out.push(data[px + b]);
+            out[out_row + x * 3] = data[px + r];
+            out[out_row + x * 3 + 1] = data[px + g];
+            out[out_row + x * 3 + 2] = data[px + b];
         }
     }
-    Frame::new(width, height, PixelFormat::Rgb8, out)
+    Frame::new_with_stride(width, height, PixelFormat::Rgb8, stride, out)
         .map_err(|e| WaylandError::InvalidFrame(e.to_string()))
 }
 
@@ -117,7 +125,9 @@ mod tests {
     fn bgra_drops_alpha_and_orders_channels() -> Result<(), WaylandError> {
         let data = vec![30, 20, 10, 255, 60, 50, 40, 0];
         let f = packed_to_frame(VideoFormat::BGRA, 2, 1, 8, 0, &data)?;
-        assert_eq!(f.data, vec![10, 20, 30, 40, 50, 60]);
+        assert_eq!(f.stride, 8);
+        assert_eq!(f.row(0), vec![10, 20, 30, 40, 50, 60]);
+        assert_eq!(f.data, vec![10, 20, 30, 40, 50, 60, 0, 0]);
         Ok(())
     }
 
@@ -125,7 +135,8 @@ mod tests {
     fn rgba_keeps_channel_order() -> Result<(), WaylandError> {
         let data = vec![10, 20, 30, 255, 40, 50, 60, 255];
         let f = packed_to_frame(VideoFormat::RGBA, 2, 1, 8, 0, &data)?;
-        assert_eq!(f.data, vec![10, 20, 30, 40, 50, 60]);
+        assert_eq!(f.stride, 8);
+        assert_eq!(f.row(0), vec![10, 20, 30, 40, 50, 60]);
         Ok(())
     }
 
@@ -133,11 +144,11 @@ mod tests {
     fn bgrx_and_rgbx_match_their_alpha_twins() -> Result<(), WaylandError> {
         let data = vec![3, 2, 1, 9, 6, 5, 4, 9];
         assert_eq!(
-            packed_to_frame(VideoFormat::BGRx, 2, 1, 8, 0, &data)?.data,
+            packed_to_frame(VideoFormat::BGRx, 2, 1, 8, 0, &data)?.row(0),
             vec![1, 2, 3, 4, 5, 6]
         );
         assert_eq!(
-            packed_to_frame(VideoFormat::RGBx, 2, 1, 8, 0, &data)?.data,
+            packed_to_frame(VideoFormat::RGBx, 2, 1, 8, 0, &data)?.row(0),
             vec![3, 2, 1, 6, 5, 4]
         );
         Ok(())
@@ -165,7 +176,13 @@ mod tests {
         data.extend_from_slice(&[10, 20, 30, 255, 0, 0, 0, 0]);
         data.extend_from_slice(&[40, 50, 60, 255, 0, 0, 0, 0]);
         let f = packed_to_frame(VideoFormat::BGRA, 1, 2, 8, 2, &data)?;
-        assert_eq!(f.data, vec![30, 20, 10, 60, 50, 40]);
+        assert_eq!(f.stride, 8);
+        assert_eq!(f.row(0), vec![30, 20, 10]);
+        assert_eq!(f.row(1), vec![60, 50, 40]);
+        assert_eq!(
+            f.data,
+            vec![30, 20, 10, 0, 0, 0, 0, 0, 60, 50, 40, 0, 0, 0, 0, 0]
+        );
         Ok(())
     }
 

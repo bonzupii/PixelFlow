@@ -5,15 +5,18 @@ use pixelflow_core::Frame;
 
 /// Expand an RGB8 frame to RGBA8 with an opaque alpha channel, for
 /// texture upload. The layout is row-major, top row first, matching
-/// the frame.
+/// the frame. Rows are read through the frame's row accessor, so a
+/// strided frame uploads correctly; the output is tightly packed.
 #[must_use]
 pub fn rgba8_from_rgb8(frame: &Frame) -> Vec<u8> {
     let mut out = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
-    for px in frame.data.as_chunks::<3>().0 {
-        out.push(px[0]);
-        out.push(px[1]);
-        out.push(px[2]);
-        out.push(255);
+    for y in 0..frame.height {
+        for px in frame.row(y).as_chunks::<3>().0 {
+            out.push(px[0]);
+            out.push(px[1]);
+            out.push(px[2]);
+            out.push(255);
+        }
     }
     out
 }

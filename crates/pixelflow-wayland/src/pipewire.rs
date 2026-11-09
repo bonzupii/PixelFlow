@@ -30,7 +30,7 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// State shared between the `PipeWire` loop thread and the polling side.
 struct Shared {
@@ -41,6 +41,10 @@ struct Shared {
     frames: AtomicU64,
     /// Frames dropped: out of buffers, or the channel already full.
     dropped: AtomicU64,
+    /// Next capture sequence number, stamped on every frame the
+    /// loop thread converts, delivered or not, so each captured
+    /// frame has a unique number.
+    sequence: AtomicU64,
     /// Whether a DMA-BUF buffer was already reported as an error.
     dmabuf_reported: AtomicBool,
 }
@@ -51,6 +55,7 @@ impl Shared {
             error: Mutex::new(None),
             frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            sequence: AtomicU64::new(0),
             dmabuf_reported: AtomicBool::new(false),
         }
     }
@@ -114,6 +119,9 @@ fn handle_buffer(mut buffer: pw::buffer::Buffer, data: &mut StreamData) {
     };
     match convert::packed_to_frame(format, width, height, stride, offset, bytes) {
         Ok(frame) => {
+            let frame = frame
+                .with_timestamp(Instant::now())
+                .with_sequence(data.shared.sequence.fetch_add(1, Ordering::Relaxed));
             if data.sender.try_send(frame).is_err() {
                 data.shared.dropped.fetch_add(1, Ordering::Relaxed);
             } else {

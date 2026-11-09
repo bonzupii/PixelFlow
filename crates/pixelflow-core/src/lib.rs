@@ -7,5 +7,5 @@ pub mod frame;
 pub mod pipeline;
 
 pub use format::PixelFormat;
-pub use frame::{Frame, FrameError};
-pub use pipeline::{ProcessError, Processor};
+pub use frame::{Frame, FrameError, GpuResource};
+pub use pipeline::{ProcessError, Processor, StrideSupport};

@@ -142,12 +142,14 @@ killed with no stray process left.
   Stage IV work in the mandate.
 - Configuration files (TOML) and packaging. That is Stage VII
   work in the mandate.
-- The processing framework itself: the composable graph, the
-  frame model with stride and metadata, region analysis, and
-  content-aware routing. That is Stage II and Stage III work,
-  specified in `docs/incremental-region-aware-architecture.md`.
-  What exists now is a single-frame-in, single-frame-out
-  `Processor` with an integer scale.
+- The processing framework itself: the composable graph, region
+  analysis, and content-aware routing. That is Stage II and
+  Stage III work, specified in
+  `docs/incremental-region-aware-architecture.md`. The frame
+  model with stride and metadata landed as the first Stage II
+  step (see `docs/stage2-core-design.md`). What exists now is a
+  single-frame-in, single-frame-out `Processor` with an integer
+  scale.
 
 ## License
 

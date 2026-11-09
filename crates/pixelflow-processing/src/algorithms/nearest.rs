@@ -32,22 +32,27 @@ impl Processor for Nearest {
         }
         let s = scale as usize;
         let (w, h) = (frame.width as usize, frame.height as usize);
+        let out_width = frame.width * scale;
+        let out_height = frame.height * scale;
         let mut data = vec![0u8; w * s * h * s * 3];
-        for y in 0..h {
-            for x in 0..w {
-                let src = &frame.data[(y * w + x) * 3..(y * w + x) * 3 + 3];
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                let src = frame.pixel(x, y);
                 for dy in 0..s {
                     for dx in 0..s {
-                        let dst = ((y * s + dy) * w * s + (x * s + dx)) * 3;
+                        let dst = ((y as usize * s + dy) * w * s + (x as usize * s + dx)) * 3;
                         data[dst..dst + 3].copy_from_slice(src);
                     }
                 }
             }
         }
         Ok(Frame {
-            width: frame.width * scale,
-            height: frame.height * scale,
+            width: out_width,
+            height: out_height,
             format: PixelFormat::Rgb8,
+            stride: out_width as usize * 3,
+            timestamp: frame.timestamp,
+            sequence: frame.sequence,
             data,
         })
     }
@@ -68,6 +73,22 @@ mod tests {
         assert_eq!(out.pixel(1, 0), &[1, 2, 3]);
         assert_eq!(out.pixel(2, 0), &[4, 5, 6]);
         assert_eq!(out.pixel(0, 1), &[1, 2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn strided_input_matches_tight_input() -> Result<(), String> {
+        let tight = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6])
+            .map_err(|e| e.to_string())?;
+        let strided =
+            Frame::new_with_stride(2, 1, PixelFormat::Rgb8, 8, vec![1, 2, 3, 4, 5, 6, 0, 0])
+                .map_err(|e| e.to_string())?
+                .with_sequence(7);
+        let from_tight = Nearest.process(&tight, 2).map_err(|e| e.to_string())?;
+        let from_strided = Nearest.process(&strided, 2).map_err(|e| e.to_string())?;
+        assert_eq!(from_strided.data, from_tight.data);
+        assert_eq!(from_strided.sequence, 7);
+        assert_eq!(from_strided.timestamp, strided.timestamp);
         Ok(())
     }
 }

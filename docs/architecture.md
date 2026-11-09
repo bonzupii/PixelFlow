@@ -25,18 +25,25 @@ input forwarding does not exist yet.
 
 - `PixelFormat`: `Rgb8`, `Rgba8`, `Gray8`. Bytes per pixel and
   channel count come from the format, never from a magic number.
-- `Frame`: width, height, format, and an owned row-major data
-  buffer. All four fields are public. The buffer is tightly
-  packed: its length is exactly `width * height *
-  format.bytes_per_pixel()`, and there is no stride field. A
-  frame whose rows carry padding cannot exist through the
-  public API. `Frame::new` rejects a buffer whose length does
-  not match the dimensions and format instead of building a
-  corrupt frame. `Frame::to_rgb8` is the single place that
-  converts other formats to RGB8 (dropping alpha, expanding
-  grey); the processing pipeline works on RGB8. PipeWire
-  buffers do have strides; the Wayland converter handles them
-  on the way in (see below).
+- `Frame`: width, height, format, row stride, capture
+  metadata, and an owned row-major data buffer. All fields are
+  public. The buffer is `height * stride` bytes long, and the
+  stride is at least `width * format.bytes_per_pixel()`; tight
+  packing is the special case where the stride equals one row.
+  `Frame::new` builds a tight frame and `Frame::new_with_stride`
+  builds a strided one; both reject a buffer whose length does
+  not match the dimensions, format, and stride instead of
+  building a corrupt frame. `pixel(x, y)` and `row(y)` read
+  through the stride, and `Frame::packed` returns a tight copy
+  (borrowing the frame itself when it is already tight).
+  Metadata is a capture timestamp (monotonic clock, for frame
+  pacing) and a capture sequence number (for the dirty-region
+  work); processors propagate both from input to output.
+  `Frame::to_rgb8` is the single place that converts other
+  formats to RGB8 (dropping alpha, expanding grey); the
+  processing pipeline works on RGB8. PipeWire buffers do have
+  strides; the Wayland converter keeps the chunk stride in the
+  frame it builds (see below).
 - `Processor` trait (`pipeline.rs`): the contract every algorithm
   implements.
 
@@ -44,13 +51,16 @@ input forwarding does not exist yet.
 trait Processor {
     fn name(&self) -> &'static str;
     fn supported_scales(&self) -> &[u32];
+    fn stride_support(&self) -> StrideSupport;
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError>;
 }
 ```
 
 `ProcessError` covers unsupported scales, unsupported formats,
 and internal failures. The trait is deliberately narrow: one
-frame in, one frame out, an integer scale. Capture,
+frame in, one frame out, an integer scale. `stride_support`
+declares whether the node reads any stride or needs tight
+input packed first; contour is the tight-only node. Capture,
 presentation, and the CLI program against it, never against an
 algorithm.
 
@@ -109,7 +119,9 @@ error, never a truncated size.
 a portal ScreenCast session, connects a PipeWire stream to the
 selected node, and converts buffers to `pixelflow-core`
 frames. The conversion honors the chunk offset and row stride
-of PipeWire buffers, so padded rows convert correctly; a
+of PipeWire buffers, so padded rows convert correctly, and the
+frame it builds keeps the chunk stride with its row padding
+zeroed; a
 buffer too short for its stride is an error. DMA-BUF buffers
 are a typed error, not a silent fallback. The full lifecycle
 is in `docs/wayland.md`.

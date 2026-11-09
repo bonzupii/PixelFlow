@@ -7,6 +7,20 @@
 
 use crate::frame::Frame;
 
+/// What row layouts an algorithm accepts. Nodes declare this;
+/// the graph executor reads the declaration and packs a strided
+/// frame before a tight-only node, and the tight-only node
+/// itself packs at its entry point until the executor exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StrideSupport {
+    /// The node reads pixels through the stride-aware accessors
+    /// and accepts any stride.
+    Any,
+    /// The node indexes a tightly packed buffer directly and
+    /// needs its input packed first. See [`Frame::packed`].
+    TightOnly,
+}
+
 /// An image processing algorithm: nearest neighbour, contour, and
 /// whatever comes later all implement this trait.
 pub trait Processor {
@@ -16,6 +30,15 @@ pub trait Processor {
 
     /// Integer scale factors this algorithm supports, e.g. [2, 4].
     fn supported_scales(&self) -> &[u32];
+
+    /// What row layouts this algorithm accepts. The default is
+    /// [`StrideSupport::Any`]; a node that indexes a tight
+    /// buffer directly overrides this with
+    /// [`StrideSupport::TightOnly`] and packs its input at its
+    /// entry point.
+    fn stride_support(&self) -> StrideSupport {
+        StrideSupport::Any
+    }
 
     /// Process one frame. The input frame's format must be RGB8; use
     /// [`Frame::to_rgb8`] first for anything else. The output frame

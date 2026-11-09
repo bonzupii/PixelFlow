@@ -28,7 +28,7 @@
 //! skips the edge follower (12 only); `CONTOUR_DEBUG_RUNS=1`
 //! prints each accepted run to stderr.
 
-use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
+use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor, StrideSupport};
 
 // ---------------------------------------------------------------- images
 #[derive(Clone)]
@@ -1708,6 +1708,14 @@ impl Processor for Contour {
         &[2, 4]
     }
 
+    fn stride_support(&self) -> StrideSupport {
+        // The kernel indexes a tightly packed buffer directly;
+        // the input is packed at the entry point below. The
+        // declaration lets the future graph executor insert the
+        // pack instead.
+        StrideSupport::TightOnly
+    }
+
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
             return Err(ProcessError::UnsupportedScale {
@@ -1721,6 +1729,10 @@ impl Processor for Contour {
                 format: frame.format.to_string(),
             });
         }
+        // Pack a strided input; a tight frame is borrowed, so the
+        // common path pays no copy.
+        let frame = frame.packed();
+        let frame = &*frame;
         // Output dimensions are frame dims times the scale; fail
         // early with an honest error instead of truncating.
         let out_width = frame.width.checked_mul(scale).ok_or_else(|| {
@@ -1749,6 +1761,9 @@ impl Processor for Contour {
             width: out_width,
             height: out_height,
             format: PixelFormat::Rgb8,
+            stride: out_width as usize * 3,
+            timestamp: frame.timestamp,
+            sequence: frame.sequence,
             data: to_u8_img(&out),
         })
     }

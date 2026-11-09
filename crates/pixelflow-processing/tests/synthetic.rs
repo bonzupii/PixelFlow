@@ -14,12 +14,11 @@
 //! comment; nothing here is a value copied from a run of the code
 //! under test.
 //!
-//! One case the mandate lists cannot be expressed through the
-//! public API: a frame whose rows carry padding. `Frame` is a
-//! tightly packed `Vec<u8>` by construction (its length must
-//! equal width times height times bytes per pixel, and there is
-//! no stride field), so a padded-stride frame cannot exist. The
-//! odd-width row-alignment test below is the closest expressible
+//! One case the mandate lists is now expressible through the
+//! public API: a frame whose rows carry padding.
+//! `Frame::new_with_stride` builds one, and the strided-contour
+//! test below runs one through the tight-only algorithm. The
+//! odd-width row-alignment test below it is the complementary
 //! case: on a 3- or 7-wide image a stride miscalculation would
 //! shift rows, and the test would catch it.
 
@@ -727,5 +726,36 @@ fn nearest_baseline_replicates_blocks_exactly() -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn contour_strided_input_matches_tight_input() -> Result<(), String> {
+    // A 4x4 pattern with a hard edge and a diagonal, built once
+    // tight and once with 4 padding bytes per row. Contour is
+    // tight-only and packs at its entry point, so both runs must
+    // produce identical output, and the strided run must carry
+    // the input's metadata through.
+    let tight = rgb_frame(4, 4, |col, row| {
+        if col + row < 4 {
+            [200, 30, 30]
+        } else {
+            [30, 30, 200]
+        }
+    })?;
+    let mut data = vec![0u8; 4 * 16];
+    for y in 0..4 {
+        data[y * 16..y * 16 + 12]
+            .copy_from_slice(tight.row(u32::try_from(y).map_err(|err| err.to_string())?));
+    }
+    let strided = Frame::new_with_stride(4, 4, PixelFormat::Rgb8, 16, data)
+        .map_err(|err| err.to_string())?
+        .with_sequence(9);
+    let algo = Contour;
+    let from_tight = algo.process(&tight, 2).map_err(|err| err.to_string())?;
+    let from_strided = algo.process(&strided, 2).map_err(|err| err.to_string())?;
+    assert_eq!(from_strided.data, from_tight.data);
+    assert_eq!(from_strided.sequence, 9);
+    assert_eq!(from_strided.timestamp, strided.timestamp);
     Ok(())
 }
