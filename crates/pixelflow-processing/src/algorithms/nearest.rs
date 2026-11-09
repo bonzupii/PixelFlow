@@ -19,7 +19,10 @@ impl Processor for Nearest {
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
-            return Err(ProcessError::UnsupportedScale { algorithm: "nearest", scale });
+            return Err(ProcessError::UnsupportedScale {
+                algorithm: "nearest",
+                scale,
+            });
         }
         if frame.format != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
@@ -41,7 +44,12 @@ impl Processor for Nearest {
                 }
             }
         }
-        Ok(Frame { width: frame.width * scale, height: frame.height * scale, format: PixelFormat::Rgb8, data })
+        Ok(Frame {
+            width: frame.width * scale,
+            height: frame.height * scale,
+            format: PixelFormat::Rgb8,
+            data,
+        })
     }
 }
 
@@ -51,8 +59,8 @@ mod tests {
 
     #[test]
     fn repeats_each_pixel() -> Result<(), String> {
-        let f =
-            Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
+        let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6])
+            .map_err(|e| e.to_string())?;
         let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
         assert_eq!(out.width, 4);
         assert_eq!(out.height, 2);

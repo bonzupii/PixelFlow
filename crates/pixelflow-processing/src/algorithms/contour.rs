@@ -58,7 +58,11 @@ impl UImg {
 
 impl FImg {
     fn new(w: usize, h: usize) -> Self {
-        FImg { w, h, d: vec![0.0; w * h * 3] }
+        FImg {
+            w,
+            h,
+            d: vec![0.0; w * h * 3],
+        }
     }
     fn get(&self, y: usize, x: usize) -> [f32; 3] {
         let i = (y * self.w + x) * 3;
@@ -154,7 +158,11 @@ fn clamp_floor_u32(v: f64, n: u32) -> u32 {
 
 /// shifted(a, dy, dx): a[y+dy][x+dx] with edge clamping, like `algos1.shifted`.
 fn shifted_u(src: &UImg, dy: isize, dx: isize) -> UImg {
-    let mut out = UImg { w: src.w, h: src.h, d: vec![0; src.d.len()] };
+    let mut out = UImg {
+        w: src.w,
+        h: src.h,
+        d: vec![0; src.d.len()],
+    };
     for y in 0..src.h {
         let sy = clamp_idx(y, dy, src.h - 1);
         for x in 0..src.w {
@@ -190,7 +198,9 @@ fn color_ids(src: &UImg) -> Vec<u32> {
 }
 
 fn to_u8_img(x: &FImg) -> Vec<u8> {
-    x.d.iter().map(|v| clamp_f(v.round(), 0.0, 255.0) as u8).collect()
+    x.d.iter()
+        .map(|v| clamp_f(v.round(), 0.0, 255.0) as u8)
+        .collect()
 }
 
 // ---------------------------------------------------------------- erf / taps
@@ -198,7 +208,8 @@ fn to_u8_img(x: &FImg) -> Vec<u8> {
 fn erf(x: f64) -> f64 {
     let (s, ax) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
     let t = 1.0 / (1.0 + 0.327_591_1 * ax);
-    let poly = (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+    let poly = (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736)
+        * t
         + 0.254_829_592)
         * t;
     s * (1.0 - poly * (-ax * ax).exp())
@@ -216,10 +227,15 @@ fn taps(u: f32, sig: f32) -> [f32; 3] {
     let mut w = [0.0f64; 3];
     let mut sum = 0.0;
     for (i, k) in ks.iter().enumerate() {
-        w[i] = phi((k + 0.5 - f64::from(u)) / f64::from(sig)) - phi((k - 0.5 - f64::from(u)) / f64::from(sig));
+        w[i] = phi((k + 0.5 - f64::from(u)) / f64::from(sig))
+            - phi((k - 0.5 - f64::from(u)) / f64::from(sig));
         sum += w[i];
     }
-    [ (w[0] / sum) as f32, (w[1] / sum) as f32, (w[2] / sum) as f32 ]
+    [
+        (w[0] / sum) as f32,
+        (w[1] / sum) as f32,
+        (w[2] / sum) as f32,
+    ]
 }
 
 // ---------------------------------------------------------------- blur
@@ -359,7 +375,11 @@ fn scale2x(src: &UImg) -> UImg {
         let sx = clamp_idx(x, dx, src.w - 1);
         ids[sy * src.w + sx]
     };
-    let mut out = UImg { w: src.w * 2, h: src.h * 2, d: vec![0; src.w * 2 * src.h * 2 * 3] };
+    let mut out = UImg {
+        w: src.w * 2,
+        h: src.h * 2,
+        d: vec![0; src.w * 2 * src.h * 2 * 3],
+    };
     for y in 0..src.h {
         for x in 0..src.w {
             let up = id_at(y, -1, x, 0);
@@ -499,9 +519,15 @@ fn dither_blend(a: &UImg) -> FImg {
 
 // ---------------------------------------------------------------- 08
 const OFFS: [(isize, isize); 9] = [
-    (-1, -1), (-1, 0), (-1, 1),
-    (0, -1), (0, 0), (0, 1),
-    (1, -1), (1, 0), (1, 1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 0),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
 ];
 
 /// 08: contrast-adaptive sharp labelset, `algos2.labelset_adaptive`.
@@ -514,7 +540,9 @@ fn labelset_adaptive(src: &UImg, scale: usize) -> FImg {
     // The scale factor as an f32 for the tap math. Scales are 2 or 4
     // (validated by the caller); anything past u16 is not a real
     // scale, and the empty image is the only FImg this can return.
-    let Ok(scale_u16) = u16::try_from(scale) else { return FImg::new(0, 0) };
+    let Ok(scale_u16) = u16::try_from(scale) else {
+        return FImg::new(0, 0);
+    };
     let scale_f = f32::from(scale_u16);
     // 9 shifted colour/id planes
     let mut planes_c: Vec<FImg> = Vec::with_capacity(9);
@@ -574,7 +602,11 @@ fn labelset_adaptive(src: &UImg, scale: usize) -> FImg {
                     let mut i2 = 0;
                     let mut best = f32::NEG_INFINITY;
                     for i in 0..9 {
-                        let lv = if planes_id[i][y * width + x] == id1 { -1.0 } else { label_w[i] };
+                        let lv = if planes_id[i][y * width + x] == id1 {
+                            -1.0
+                        } else {
+                            label_w[i]
+                        };
                         if lv > best {
                             best = lv;
                             i2 = i;
@@ -628,11 +660,15 @@ fn merge_low_contrast(src: &UImg) -> FImg {
                 let idx = y * width + x;
                 den[idx] += wgt;
                 let cur = num.get(y, x);
-                num.set(y, x, [
-                    cur[0] + wgt * neigh[0],
-                    cur[1] + wgt * neigh[1],
-                    cur[2] + wgt * neigh[2],
-                ]);
+                num.set(
+                    y,
+                    x,
+                    [
+                        cur[0] + wgt * neigh[0],
+                        cur[1] + wgt * neigh[1],
+                        cur[2] + wgt * neigh[2],
+                    ],
+                );
             }
         }
     }
@@ -641,7 +677,11 @@ fn merge_low_contrast(src: &UImg) -> FImg {
         for x in 0..width {
             let denom = den[y * width + x].max(1e-6);
             let num_px = num.get(y, x);
-            out.set(y, x, [num_px[0] / denom, num_px[1] / denom, num_px[2] / denom]);
+            out.set(
+                y,
+                x,
+                [num_px[0] / denom, num_px[1] / denom, num_px[2] / denom],
+            );
         }
     }
     out
@@ -714,7 +754,15 @@ fn gated_merge(a: &UImg) -> FImg {
     let mut out = FImg::new(a.w, a.h);
     for y in 0..a.h {
         for x in 0..a.w {
-            out.set(y, x, if gate[y * a.w + x] { merged.get(y, x) } else { a.getf(y, x) });
+            out.set(
+                y,
+                x,
+                if gate[y * a.w + x] {
+                    merged.get(y, x)
+                } else {
+                    a.getf(y, x)
+                },
+            );
         }
     }
     out
@@ -751,7 +799,15 @@ fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
             }
             std /= 3.0;
             let gate = clamp_f(std / 30.0, 0.0, 1.0);
-            out.set(y, x, [strength * g[0] * gate, strength * g[1] * gate, strength * g[2] * gate]);
+            out.set(
+                y,
+                x,
+                [
+                    strength * g[0] * gate,
+                    strength * g[1] * gate,
+                    strength * g[2] * gate,
+                ],
+            );
         }
     }
     out
@@ -764,7 +820,11 @@ fn hardlight(base: &FImg, top: &FImg) -> FImg {
         for c in 0..3 {
             let b = base.d[i * 3 + c] / 255.0;
             let t = top.d[i * 3 + c] / 255.0;
-            let v = if t <= 0.5 { 2.0 * b * t } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - t) };
+            let v = if t <= 0.5 {
+                2.0 * b * t
+            } else {
+                1.0 - 2.0 * (1.0 - b) * (1.0 - t)
+            };
             out.d[i * 3 + c] = v * 255.0;
         }
     }
@@ -820,6 +880,106 @@ fn combined(a: &UImg, s: usize) -> FImg {
 }
 
 // ---------------------------------------------------------------- SG fit
+const SG7_VALUE: &[f64] = &[
+    -0.095_238_095_238_095_19,
+    0.142_857_142_857_142_9,
+    0.285_714_285_714_285_6,
+    0.333_333_333_333_333_26,
+    0.285_714_285_714_285_6,
+    0.142_857_142_857_142_82,
+    -0.095_238_095_238_095_2,
+];
+const SG7_DERIV: &[f64] = &[
+    -0.107_142_857_142_857_19,
+    -0.071_428_571_428_571_44,
+    -0.035_714_285_714_285_705,
+    1.306_861_959_119_566_4e-17,
+    0.035_714_285_714_285_74,
+    0.071_428_571_428_571_44,
+    0.107_142_857_142_857_15,
+];
+const SG7_CURV: &[f64] = &[
+    0.059_523_809_523_809_514,
+    -1.387_778_780_781_445_7e-17,
+    -0.035_714_285_714_285_7,
+    -0.047_619_047_619_047_6,
+    -0.035_714_285_714_285_7,
+    3.469_446_951_953_614e-18,
+    0.059_523_809_523_809_51,
+];
+const SG9_VALUE: &[f64] = &[
+    -0.090_909_090_909_090_94,
+    0.060_606_060_606_060_61,
+    0.168_831_168_831_168_8,
+    0.233_766_233_766_233_73,
+    0.255_411_255_411_255_4,
+    0.233_766_233_766_233_73,
+    0.168_831_168_831_168_8,
+    0.060_606_060_606_060_59,
+    -0.090_909_090_909_090_93,
+];
+const SG9_DERIV: &[f64] = &[
+    -0.066_666_666_666_666_65,
+    -0.05,
+    -0.033_333_333_333_333_326,
+    -0.016_666_666_666_666_663,
+    3.583_229_404_124_381_4e-18,
+    0.016_666_666_666_666_67,
+    0.033_333_333_333_333_34,
+    0.05,
+    0.066_666_666_666_666_65,
+];
+const SG9_CURV: &[f64] = &[
+    0.030_303_030_303_030_297,
+    0.007_575_757_575_757_572_5,
+    -0.008_658_008_658_008_658,
+    -0.018_398_268_398_268_393,
+    -0.021_645_021_645_021_64,
+    -0.018_398_268_398_268_393,
+    -0.008_658_008_658_008_658,
+    0.007_575_757_575_757_574,
+    0.030_303_030_303_030_297,
+];
+const SG11_VALUE: &[f64] = &[
+    -0.083_916_083_916_083_82,
+    0.020_979_020_979_021_032,
+    0.102_564_102_564_102_52,
+    0.160_839_160_839_160_86,
+    0.195_804_195_804_195_8,
+    0.207_459_207_459_207_43,
+    0.195_804_195_804_195_8,
+    0.160_839_160_839_160_8,
+    0.102_564_102_564_102_55,
+    0.020_979_020_979_020_956,
+    -0.083_916_083_916_083_95,
+];
+const SG11_DERIV: &[f64] = &[
+    -0.045_454_545_454_545_44,
+    -0.036_363_636_363_636_38,
+    -0.027_272_727_272_727_282,
+    -0.018_181_818_181_818_2,
+    -0.009_090_909_090_909_101,
+    -5.904_506_863_422_596_4e-18,
+    0.009_090_909_090_909_09,
+    0.018_181_818_181_818_188,
+    0.027_272_727_272_727_28,
+    0.036_363_636_363_636_38,
+    0.045_454_545_454_545_484,
+];
+const SG11_CURV: &[f64] = &[
+    0.017_482_517_482_517_47,
+    0.006_993_006_993_006_988,
+    -0.001_165_501_165_501_160_7,
+    -0.006_993_006_993_006_996_5,
+    -0.010_489_510_489_510_49,
+    -0.011_655_011_655_011_656,
+    -0.010_489_510_489_510_492,
+    -0.006_993_006_993_006_992,
+    -0.001_165_501_165_501_165,
+    0.006_993_006_993_006_996,
+    0.017_482_517_482_517_484,
+];
+
 /// Savitzky-Golay kernels for an odd window, quadratic fit, evaluated
 /// at centre: (value, derivative, curvature) weights. These are the
 /// exact f64 values numpy's pinv(Vandermonde) returns in algos4
@@ -832,21 +992,9 @@ fn combined(a: &UImg, s: usize) -> FImg {
 /// only windows `fit_run` can ask for (7, 9, 11).
 fn sg_kernels(win: usize) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let (kv, kd, k2): (&[f64], &[f64], &[f64]) = match win {
-        7 => (
-            &[-0.095_238_095_238_095_19, 0.142_857_142_857_142_9, 0.285_714_285_714_285_6, 0.333_333_333_333_333_26, 0.285_714_285_714_285_6, 0.142_857_142_857_142_82, -0.095_238_095_238_095_2],
-            &[-0.107_142_857_142_857_19, -0.071_428_571_428_571_44, -0.035_714_285_714_285_705, 1.306_861_959_119_566_4e-17, 0.035_714_285_714_285_74, 0.071_428_571_428_571_44, 0.107_142_857_142_857_15],
-            &[0.059_523_809_523_809_514, -1.387_778_780_781_445_7e-17, -0.035_714_285_714_285_7, -0.047_619_047_619_047_6, -0.035_714_285_714_285_7, 3.469_446_951_953_614e-18, 0.059_523_809_523_809_51],
-        ),
-        9 => (
-            &[-0.090_909_090_909_090_94, 0.060_606_060_606_060_61, 0.168_831_168_831_168_8, 0.233_766_233_766_233_73, 0.255_411_255_411_255_4, 0.233_766_233_766_233_73, 0.168_831_168_831_168_8, 0.060_606_060_606_060_59, -0.090_909_090_909_090_93],
-            &[-0.066_666_666_666_666_65, -0.05, -0.033_333_333_333_333_326, -0.016_666_666_666_666_663, 3.583_229_404_124_381_4e-18, 0.016_666_666_666_666_67, 0.033_333_333_333_333_34, 0.05, 0.066_666_666_666_666_65],
-            &[0.030_303_030_303_030_297, 0.007_575_757_575_757_572_5, -0.008_658_008_658_008_658, -0.018_398_268_398_268_393, -0.021_645_021_645_021_64, -0.018_398_268_398_268_393, -0.008_658_008_658_008_658, 0.007_575_757_575_757_574, 0.030_303_030_303_030_297],
-        ),
-        11 => (
-            &[-0.083_916_083_916_083_82, 0.020_979_020_979_021_032, 0.102_564_102_564_102_52, 0.160_839_160_839_160_86, 0.195_804_195_804_195_8, 0.207_459_207_459_207_43, 0.195_804_195_804_195_8, 0.160_839_160_839_160_8, 0.102_564_102_564_102_55, 0.020_979_020_979_020_956, -0.083_916_083_916_083_95],
-            &[-0.045_454_545_454_545_44, -0.036_363_636_363_636_38, -0.027_272_727_272_727_282, -0.018_181_818_181_818_2, -0.009_090_909_090_909_101, -5.904_506_863_422_596_4e-18, 0.009_090_909_090_909_09, 0.018_181_818_181_818_188, 0.027_272_727_272_727_28, 0.036_363_636_363_636_38, 0.045_454_545_454_545_484],
-            &[0.017_482_517_482_517_47, 0.006_993_006_993_006_988, -0.001_165_501_165_501_160_7, -0.006_993_006_993_006_996_5, -0.010_489_510_489_510_49, -0.011_655_011_655_011_656, -0.010_489_510_489_510_492, -0.006_993_006_993_006_992, -0.001_165_501_165_501_165, 0.006_993_006_993_006_996, 0.017_482_517_482_517_484],
-        ),
+        7 => (SG7_VALUE, SG7_DERIV, SG7_CURV),
+        9 => (SG9_VALUE, SG9_DERIV, SG9_CURV),
+        11 => (SG11_VALUE, SG11_DERIV, SG11_CURV),
         _ => return None,
     };
     Some((kv.to_vec(), kd.to_vec(), k2.to_vec()))
@@ -889,7 +1037,13 @@ fn fit_run(samples: &[f64]) -> Option<FitResult> {
     let slope = conv(&kd);
     let c2 = conv(&k2);
     let len_f = f64::from(u32::try_from(len).ok()?);
-    let rms = (samples.iter().zip(fitted.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / len_f).sqrt();
+    let rms = (samples
+        .iter()
+        .zip(fitted.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        / len_f)
+        .sqrt();
     Some((fitted, slope, c2, rms))
 }
 
@@ -912,7 +1066,11 @@ struct RawRun {
 /// neighbouring high-contrast diffs of one colour, tracked across
 /// columns (`axis` 0) or rows (`axis` 1). Part of `find_runs2`.
 fn extract_runs(src: &UImg, axis: usize, min_contrast: f32) -> Vec<RawRun> {
-    let (n_along, n_across) = if axis == 0 { (src.w, src.h - 1) } else { (src.h, src.w - 1) };
+    let (n_along, n_across) = if axis == 0 {
+        (src.w, src.h - 1)
+    } else {
+        (src.h, src.w - 1)
+    };
     // diff, Aarr, Barr as closures over (along index j, across index i)
     let diff_at = |j: usize, i: usize| -> f32 {
         if axis == 0 {
@@ -926,7 +1084,11 @@ fn extract_runs(src: &UImg, axis: usize, min_contrast: f32) -> Vec<RawRun> {
         }
     };
     let col_at = |j: usize, i: usize| -> [u8; 3] {
-        if axis == 0 { src.get(i, j) } else { src.get(j, i) }
+        if axis == 0 {
+            src.get(i, j)
+        } else {
+            src.get(j, i)
+        }
     };
     let mut active: Vec<RawRun> = Vec::new();
     let mut done: Vec<RawRun> = Vec::new();
@@ -960,7 +1122,12 @@ fn extract_runs(src: &UImg, axis: usize, min_contrast: f32) -> Vec<RawRun> {
             }
             match best {
                 None => {
-                    active.push(RawRun { t: vec![j64], v: vec![pos], a: col, last_y: pos });
+                    active.push(RawRun {
+                        t: vec![j64],
+                        v: vec![pos],
+                        a: col,
+                        last_y: pos,
+                    });
                     used.push(false);
                 }
                 Some(k) => {
@@ -987,6 +1154,35 @@ fn extract_runs(src: &UImg, axis: usize, min_contrast: f32) -> Vec<RawRun> {
 /// Fit raw runs and keep the coherent ones: long enough, low fit
 /// residual, bounded slope and curvature (apex included). Part of
 /// `find_runs2`.
+/// Monotonicity gate: one slope sign change allowed per 7-sample window.
+/// Returns, per sample, whether the window around that sample changes
+/// direction at most once.
+fn monotonicity_ok(values: &[f64]) -> Vec<bool> {
+    let len = values.len();
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let lo = i.saturating_sub(3);
+        let hi = std::cmp::min(len, i + 4);
+        let mut changes = 0i32;
+        let mut prev: Option<i8> = None;
+        for k in lo..hi - 1 {
+            let delta = values[k + 1] - values[k];
+            if delta == 0.0 {
+                continue;
+            }
+            let direction: i8 = if delta > 0.0 { 1 } else { -1 };
+            if let Some(prev_sign) = prev
+                && direction != prev_sign
+            {
+                changes += 1;
+            }
+            prev = Some(direction);
+        }
+        out.push(changes <= 1);
+    }
+    out
+}
+
 fn finish_runs(
     raw: Vec<RawRun>,
     min_len: usize,
@@ -1002,14 +1198,27 @@ fn finish_runs(
         }
         let times = r.t;
         let values = r.v;
-        let Some((fitted, slope, curv2, rms)) = fit_run(&values) else { continue };
+        let Some((fitted, slope, curv2, rms)) = fit_run(&values) else {
+            continue;
+        };
         if rms > max_rms {
             continue;
         }
         let len = values.len();
         let mut ok: Vec<bool> = slope.iter().map(|s| s.abs() <= max_slope).collect();
         // apex: slope sign changes mark a peak/valley
-        let sgn: Vec<i8> = slope.iter().map(|s| if *s > 0.0 { 1 } else if *s < 0.0 { -1 } else { 0 }).collect();
+        let sgn: Vec<i8> = slope
+            .iter()
+            .map(|s| {
+                if *s > 0.0 {
+                    1
+                } else if *s < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
         let mut apex = vec![false; len];
         for i in 0..len - 1 {
             if sgn[i + 1] != sgn[i] {
@@ -1019,29 +1228,14 @@ fn finish_runs(
             }
         }
         for i in 0..len {
-            let curv_ok = curv2[i].abs() <= max_curv || (apex[i] && curv2[i].abs() <= max_curv_apex);
+            let curv_ok =
+                curv2[i].abs() <= max_curv || (apex[i] && curv2[i].abs() <= max_curv_apex);
             ok[i] = ok[i] && curv_ok;
         }
         // monotonicity with one sign change allowed per 7-sample window
-        for (i, _) in values.iter().enumerate() {
-            let lo = i.saturating_sub(3);
-            let hi = std::cmp::min(len, i + 4);
-            let mut changes = 0i32;
-            let mut prev: Option<i8> = None;
-            for k in lo..hi - 1 {
-                let delta = values[k + 1] - values[k];
-                if delta == 0.0 {
-                    continue;
-                }
-                let direction: i8 = if delta > 0.0 { 1 } else { -1 };
-                if let Some(prev_sign) = prev && direction != prev_sign {
-                    changes += 1;
-                }
-                prev = Some(direction);
-            }
-            if changes > 1 {
-                ok[i] = false;
-            }
+        let mono = monotonicity_ok(&values);
+        for i in 0..len {
+            ok[i] = ok[i] && mono[i];
         }
         if ok.iter().filter(|b| **b).count() < min_len {
             continue;
@@ -1058,26 +1252,61 @@ fn finish_runs(
                 ok.iter().filter(|b| **b).count()
             );
             if times[0] == 0 && times[times.len() - 1] == 242 {
-                eprintln!("rs ok: {}", ok.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>());
-                eprintln!("rs c2: {:?}", curv2.iter().take(20).map(|cv| (cv * 10000.0).round() / 10000.0).collect::<Vec<_>>());
+                eprintln!(
+                    "rs ok: {}",
+                    ok.iter()
+                        .map(|b| if *b { '1' } else { '0' })
+                        .collect::<String>()
+                );
+                eprintln!(
+                    "rs c2: {:?}",
+                    curv2
+                        .iter()
+                        .take(20)
+                        .map(|cv| (cv * 10000.0).round() / 10000.0)
+                        .collect::<Vec<_>>()
+                );
             }
         }
-        out.push(Run { t: times, v: values, f: fitted, ok });
+        out.push(Run {
+            t: times,
+            v: values,
+            f: fitted,
+            ok,
+        });
     }
     out
 }
 
 /// Coherent boundary runs, `algos5.find_runs2` (apex + scaled `min_len`).
 fn find_runs2(src: &UImg) -> (Vec<Run>, Vec<Run>) {
-    let min_len = if std::cmp::min(src.h, src.w) >= 200 { 24usize } else { 12usize };
+    let min_len = if std::cmp::min(src.h, src.w) >= 200 {
+        24usize
+    } else {
+        12usize
+    };
     let min_contrast = 50.0f32;
     let max_slope = 0.75f64;
     let max_rms = 0.45f64;
     let max_curv = 0.02f64;
     let max_curv_apex = 0.06f64;
     (
-        finish_runs(extract_runs(src, 0, min_contrast), min_len, max_slope, max_rms, max_curv, max_curv_apex),
-        finish_runs(extract_runs(src, 1, min_contrast), min_len, max_slope, max_rms, max_curv, max_curv_apex),
+        finish_runs(
+            extract_runs(src, 0, min_contrast),
+            min_len,
+            max_slope,
+            max_rms,
+            max_curv,
+            max_curv_apex,
+        ),
+        finish_runs(
+            extract_runs(src, 1, min_contrast),
+            min_len,
+            max_slope,
+            max_rms,
+            max_curv,
+            max_curv_apex,
+        ),
     )
 }
 
@@ -1091,10 +1320,16 @@ fn find_runs2(src: &UImg) -> (Vec<Run>, Vec<Run>) {
 /// fraction uses the unclamped floor, as in the reference.
 fn profile_sample_vec(src: &UImg, axis: usize, idx: usize, coords: &[f64]) -> Vec<[f32; 3]> {
     let len = if axis == 0 { src.h } else { src.w };
-    let Ok(len_u32) = u32::try_from(len) else { return Vec::new() };
+    let Ok(len_u32) = u32::try_from(len) else {
+        return Vec::new();
+    };
     let col = |i: usize| -> [f32; 3] {
         let clamped = i.min(len.saturating_sub(1));
-        if axis == 0 { src.getf(clamped, idx) } else { src.getf(idx, clamped) }
+        if axis == 0 {
+            src.getf(clamped, idx)
+        } else {
+            src.getf(idx, clamped)
+        }
     };
     coords
         .iter()
@@ -1193,10 +1428,20 @@ fn run_slice(
         coords.push((u_f * scale_f + jf + 0.5) / scale_f);
         jf += 1.0;
     }
-    let fitted = coords.iter().map(|&uu| interp(uu, times, &run.f)).collect::<Option<Vec<f64>>>()?;
+    let fitted = coords
+        .iter()
+        .map(|&uu| interp(uu, times, &run.f))
+        .collect::<Option<Vec<f64>>>()?;
     let weights_f64: Vec<f64> = weights.iter().map(|v| f64::from(*v)).collect();
-    let wgt = coords.iter().map(|&uu| interp(uu, times, &weights_f64)).collect::<Option<Vec<f64>>>()?;
-    Some(RunSlice { outs, fitted, weights: wgt })
+    let wgt = coords
+        .iter()
+        .map(|&uu| interp(uu, times, &weights_f64))
+        .collect::<Option<Vec<f64>>>()?;
+    Some(RunSlice {
+        outs,
+        fitted,
+        weights: wgt,
+    })
 }
 
 /// Re-render one run slice across output rows (horizontal runs).
@@ -1210,7 +1455,9 @@ fn apply_horizontal(
     out_h: usize,
 ) {
     let band = 2.5f64;
-    let Ok(out_h_u32) = u32::try_from(out_h) else { return };
+    let Ok(out_h_u32) = u32::try_from(out_h) else {
+        return;
+    };
     let fitted = &slice.fitted;
     let weights = &slice.weights;
     let fmin = fitted.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1250,11 +1497,15 @@ fn apply_horizontal(
             let oy = oy0 + yi;
             let cur = ctx.out.get(oy, ox);
             let wj = weights[j] as f32;
-            ctx.out.set(oy, ox, [
-                (1.0 - wj) * cur[0] + wj * vals[vi][0],
-                (1.0 - wj) * cur[1] + wj * vals[vi][1],
-                (1.0 - wj) * cur[2] + wj * vals[vi][2],
-            ]);
+            ctx.out.set(
+                oy,
+                ox,
+                [
+                    (1.0 - wj) * cur[0] + wj * vals[vi][0],
+                    (1.0 - wj) * cur[1] + wj * vals[vi][1],
+                    (1.0 - wj) * cur[2] + wj * vals[vi][2],
+                ],
+            );
             ctx.best[oy * ctx.out.w + ox] = (ys[yi] - fitted[j]).abs() as f32;
             ctx.touched[oy * ctx.out.w + ox] = true;
         }
@@ -1272,7 +1523,9 @@ fn apply_vertical(
     out_w: usize,
 ) {
     let band = 2.5f64;
-    let Ok(out_w_u32) = u32::try_from(out_w) else { return };
+    let Ok(out_w_u32) = u32::try_from(out_w) else {
+        return;
+    };
     let fitted = &slice.fitted;
     let weights = &slice.weights;
     let fmin = fitted.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1312,11 +1565,15 @@ fn apply_vertical(
             let ox = ox0 + xi;
             let cur = ctx.out.get(oy, ox);
             let wj = weights[j] as f32;
-            ctx.out.set(oy, ox, [
-                (1.0 - wj) * cur[0] + wj * vals[vi][0],
-                (1.0 - wj) * cur[1] + wj * vals[vi][1],
-                (1.0 - wj) * cur[2] + wj * vals[vi][2],
-            ]);
+            ctx.out.set(
+                oy,
+                ox,
+                [
+                    (1.0 - wj) * cur[0] + wj * vals[vi][0],
+                    (1.0 - wj) * cur[1] + wj * vals[vi][1],
+                    (1.0 - wj) * cur[2] + wj * vals[vi][2],
+                ],
+            );
             ctx.best[oy * ctx.out.w + ox] = (xs[xi] - fitted[j]).abs() as f32;
             ctx.touched[oy * ctx.out.w + ox] = true;
         }
@@ -1332,15 +1589,24 @@ fn apply_run(
     out_w: usize,
     ctx: &mut FollowCtx<'_>,
 ) {
-    let Ok(scale_u32) = u32::try_from(scale) else { return };
+    let Ok(scale_u32) = u32::try_from(scale) else {
+        return;
+    };
     let scale_f = f64::from(scale_u32);
     let times = &run.t;
     let Some(&t_last) = times.last() else { return };
-    let weights = uniform1d_nearest(&run.ok.iter().map(|b| if *b { 1.0f32 } else { 0.0 }).collect::<Vec<_>>());
+    let weights = uniform1d_nearest(
+        &run.ok
+            .iter()
+            .map(|b| if *b { 1.0f32 } else { 0.0 })
+            .collect::<Vec<_>>(),
+    );
     let t0 = times[0];
     let t1 = t_last;
     for u in t0..=t1 {
-        let Ok(u_u32) = u32::try_from(u) else { continue };
+        let Ok(u_u32) = u32::try_from(u) else {
+            continue;
+        };
         let u_idx = u_u32 as usize;
         let u_f = f64::from(u_u32);
         // searchsorted left, clamped
@@ -1352,7 +1618,9 @@ fn apply_run(
             continue;
         }
         let v_u = run.v[idx];
-        let Some(slice) = run_slice(run, u_idx, u_f, scale, scale_f, &weights) else { return };
+        let Some(slice) = run_slice(run, u_idx, u_f, scale, scale_f, &weights) else {
+            return;
+        };
         if axis == 0 {
             apply_horizontal(ctx, &slice, u_idx, v_u, scale_f, out_h);
         } else {
@@ -1378,19 +1646,31 @@ fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
     // and the f32 comparison is the reference port's behaviour.
     let mut best = vec![f32::INFINITY; width * scale * height * scale];
     let mut touched = vec![false; width * scale * height * scale];
-    let mut ctx = FollowCtx { src, out: &mut out, best: &mut best, touched: &mut touched };
+    let mut ctx = FollowCtx {
+        src,
+        out: &mut out,
+        best: &mut best,
+        touched: &mut touched,
+    };
     for run in &h_runs {
         apply_run(run, 0, scale, height * scale, width * scale, &mut ctx);
     }
     for run in &v_runs {
         apply_run(run, 1, scale, height * scale, width * scale, &mut ctx);
     }
-    let (touched_count, total_count) =
-        touched.iter().fold((0u32, 0u32), |(count, total), b| (count + u32::from(*b), total + 1));
+    let (touched_count, total_count) = touched.iter().fold((0u32, 0u32), |(count, total), b| {
+        (count + u32::from(*b), total + 1)
+    });
     let touched_frac = f64::from(touched_count) / f64::from(total_count);
     (
         out,
-        Stats { h_runs: horizontal_runs, v_runs: vertical_runs, h_len: horizontal_len, v_len: vertical_len, touched_frac },
+        Stats {
+            h_runs: horizontal_runs,
+            v_runs: vertical_runs,
+            h_len: horizontal_len,
+            v_len: vertical_len,
+            touched_frac,
+        },
     )
 }
 
@@ -1399,7 +1679,16 @@ fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
 fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
     let base = combined(a, s);
     if std::env::var("CONTOUR_NO_FOLLOW").is_ok() {
-        return (base, Stats { h_runs: 0, v_runs: 0, h_len: 0, v_len: 0, touched_frac: 0.0 });
+        return (
+            base,
+            Stats {
+                h_runs: 0,
+                v_runs: 0,
+                h_len: 0,
+                v_len: 0,
+                touched_frac: 0.0,
+            },
+        );
     }
     edge_follow2(&base, a, s)
 }
@@ -1421,7 +1710,10 @@ impl Processor for Contour {
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
-            return Err(ProcessError::UnsupportedScale { algorithm: "contour", scale });
+            return Err(ProcessError::UnsupportedScale {
+                algorithm: "contour",
+                scale,
+            });
         }
         if frame.format != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
@@ -1437,12 +1729,20 @@ impl Processor for Contour {
         let out_height = frame.height.checked_mul(scale).ok_or_else(|| {
             ProcessError::Internal("contour output height exceeds u32 range".into())
         })?;
-        let src = UImg { w: frame.width as usize, h: frame.height as usize, d: frame.data.clone() };
+        let src = UImg {
+            w: frame.width as usize,
+            h: frame.height as usize,
+            d: frame.data.clone(),
+        };
         let (out, stats) = clean_base_edge(&src, scale as usize);
         if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
             eprintln!(
                 "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
-                stats.h_runs, stats.h_len, stats.v_runs, stats.v_len, stats.touched_frac * 100.0
+                stats.h_runs,
+                stats.h_len,
+                stats.v_runs,
+                stats.v_len,
+                stats.touched_frac * 100.0
             );
         }
         Ok(Frame {

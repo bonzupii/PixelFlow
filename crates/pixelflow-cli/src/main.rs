@@ -11,7 +11,7 @@ mod run;
 use clap::{Parser, Subcommand};
 use pixelflow_capture::SourceKind;
 use pixelflow_core::{ProcessError, Processor};
-use pixelflow_processing::{Nearest, Contour};
+use pixelflow_processing::{Contour, Nearest};
 use std::process::ExitCode;
 
 /// PixelFlow: cross-platform pixel-art upscaling wrapper.
@@ -68,20 +68,38 @@ fn algorithm(name: &str) -> Result<Box<dyn Processor>, String> {
     match name {
         "contour" => Ok(Box::new(Contour)),
         "nearest" => Ok(Box::new(Nearest)),
-        other => Err(format!("unknown algorithm {other:?}; available: contour, nearest")),
+        other => Err(format!(
+            "unknown algorithm {other:?}; available: contour, nearest"
+        )),
     }
 }
 
 fn run_upscale(input: &str, output: &str, scale: u32, algorithm_name: &str) -> Result<(), String> {
     let proc = algorithm(algorithm_name)?;
     if !proc.supported_scales().contains(&scale) {
-        return Err(ProcessError::UnsupportedScale { algorithm: proc.name(), scale }.to_string());
+        return Err(ProcessError::UnsupportedScale {
+            algorithm: proc.name(),
+            scale,
+        }
+        .to_string());
     }
     let frame = png_io::load_png(input)?;
-    eprintln!("input {}x{} {} scale {}x algorithm {}", frame.width, frame.height, frame.format, scale, proc.name());
+    eprintln!(
+        "input {}x{} {} scale {}x algorithm {}",
+        frame.width,
+        frame.height,
+        frame.format,
+        scale,
+        proc.name()
+    );
     let t0 = std::time::Instant::now();
     let out = proc.process(&frame, scale).map_err(|e| e.to_string())?;
-    eprintln!("output {}x{} in {:.1}s", out.width, out.height, t0.elapsed().as_secs_f32());
+    eprintln!(
+        "output {}x{} in {:.1}s",
+        out.width,
+        out.height,
+        t0.elapsed().as_secs_f32()
+    );
     png_io::save_png(output, &out)?;
     eprintln!("wrote {output}");
     Ok(())
@@ -99,7 +117,11 @@ fn run_backends() {
 
 fn run_info() {
     println!("pixelflow {}", env!("CARGO_PKG_VERSION"));
-    println!("os: {}  arch: {}", std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "os: {}  arch: {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     match std::thread::available_parallelism() {
         Ok(n) => println!("cpus: {n}"),
         Err(_) => println!("cpus: unknown"),
@@ -112,10 +134,20 @@ fn run_info() {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Upscale { input, output, scale, algorithm } => {
-            run_upscale(input, output, *scale, algorithm)
-        }
-        Command::Run { program, args, capture, scale, windowed, .. } => {
+        Command::Upscale {
+            input,
+            output,
+            scale,
+            algorithm,
+        } => run_upscale(input, output, *scale, algorithm),
+        Command::Run {
+            program,
+            args,
+            capture,
+            scale,
+            windowed,
+            ..
+        } => {
             let source = match capture.as_str() {
                 "monitor" => SourceKind::Monitor,
                 _ => SourceKind::Window,
@@ -154,9 +186,14 @@ mod tests {
     /// command is not `run`, so a wrong variant fails the asserts.
     fn run_fields(cli: Cli) -> (String, Vec<String>, String, u32, bool, bool) {
         match cli.command {
-            Command::Run { program, args, capture, scale, windowed, fullscreen } => {
-                (program, args, capture, scale, windowed, fullscreen)
-            }
+            Command::Run {
+                program,
+                args,
+                capture,
+                scale,
+                windowed,
+                fullscreen,
+            } => (program, args, capture, scale, windowed, fullscreen),
             _ => (String::new(), vec![], String::new(), 0, false, false),
         }
     }
@@ -185,8 +222,7 @@ mod tests {
 
     #[test]
     fn run_passes_trailing_args_to_the_target() -> Result<(), clap::Error> {
-        let cli =
-            Cli::try_parse_from(["pixelflow", "run", "zsnes", "--", "-s", "game.smc"])?;
+        let cli = Cli::try_parse_from(["pixelflow", "run", "zsnes", "--", "-s", "game.smc"])?;
         let (program, args, _, _, _, _) = run_fields(cli);
         assert_eq!(program, "zsnes");
         assert_eq!(args, vec!["-s".to_string(), "game.smc".to_string()]);
@@ -195,8 +231,7 @@ mod tests {
 
     #[test]
     fn windowed_and_fullscreen_conflict() {
-        let result =
-            Cli::try_parse_from(["pixelflow", "run", "x", "--windowed", "--fullscreen"]);
+        let result = Cli::try_parse_from(["pixelflow", "run", "x", "--windowed", "--fullscreen"]);
         assert!(result.is_err(), "expected a conflict error");
     }
 

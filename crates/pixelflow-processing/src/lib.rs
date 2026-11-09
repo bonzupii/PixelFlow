@@ -7,5 +7,5 @@
 
 pub mod algorithms;
 
-pub use algorithms::nearest::Nearest;
 pub use algorithms::contour::Contour;
+pub use algorithms::nearest::Nearest;

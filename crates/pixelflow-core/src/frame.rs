@@ -42,7 +42,12 @@ impl Frame {
     ///
     /// Returns [`FrameError`] when the buffer length does not equal
     /// `width * height * format.bytes_per_pixel()`.
-    pub fn new(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Result<Frame, FrameError> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        data: Vec<u8>,
+    ) -> Result<Frame, FrameError> {
         let expected = width as usize * height as usize * format.bytes_per_pixel();
         if data.len() != expected {
             return Err(FrameError {
@@ -56,14 +61,24 @@ impl Frame {
                 ),
             });
         }
-        Ok(Frame { width, height, format, data })
+        Ok(Frame {
+            width,
+            height,
+            format,
+            data,
+        })
     }
 
     /// Build a frame filled with one repeated byte value.
     #[must_use]
     pub fn filled(width: u32, height: u32, format: PixelFormat, value: u8) -> Frame {
         let len = width as usize * height as usize * format.bytes_per_pixel();
-        Frame { width, height, format, data: vec![value; len] }
+        Frame {
+            width,
+            height,
+            format,
+            data: vec![value; len],
+        }
     }
 
     /// Bytes per pixel, from the format.
@@ -104,14 +119,24 @@ impl Frame {
                 for px in self.data.as_chunks::<4>().0 {
                     data.extend_from_slice(&px[..3]);
                 }
-                Frame { width: self.width, height: self.height, format: PixelFormat::Rgb8, data }
+                Frame {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::Rgb8,
+                    data,
+                }
             }
             PixelFormat::Gray8 => {
                 let mut data = Vec::with_capacity(self.width as usize * self.height as usize * 3);
                 for &g in &self.data {
                     data.extend_from_slice(&[g, g, g]);
                 }
-                Frame { width: self.width, height: self.height, format: PixelFormat::Rgb8, data }
+                Frame {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::Rgb8,
+                    data,
+                }
             }
         }
     }

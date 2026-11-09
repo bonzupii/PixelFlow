@@ -30,7 +30,9 @@ pub struct CaptureConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        CaptureConfig { source: SourceKind::Window }
+        CaptureConfig {
+            source: SourceKind::Window,
+        }
     }
 }
 

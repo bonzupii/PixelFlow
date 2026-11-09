@@ -150,7 +150,10 @@ mod tests {
             matches!(result, Err(CaptureError::SessionFailed(_))),
             "expected SessionFailed, got {result:?}"
         );
-        assert!(backend.shutdown().is_ok(), "shutdown of a failed backend succeeds");
+        assert!(
+            backend.shutdown().is_ok(),
+            "shutdown of a failed backend succeeds"
+        );
     }
 
     #[test]

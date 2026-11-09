@@ -15,14 +15,18 @@
 //! behaviour, not a regression in this crate.
 
 use pixelflow_core::{Frame, PixelFormat, Processor};
-use pixelflow_processing::{Nearest, Contour};
+use pixelflow_processing::{Contour, Nearest};
 use std::path::PathBuf;
 
 fn fixtures_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PIXELFLOW_FIXTURES_DIR") {
         return PathBuf::from(dir);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("tests").join("fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
 }
 
 /// True when the fixture images are present. They are copyrighted
@@ -31,7 +35,10 @@ fn fixtures_dir() -> PathBuf {
 /// regression tests, otherwise the tests skip.
 fn fixtures_present(dir: &PathBuf) -> bool {
     dir.join("inputs").join("mario.png").is_file()
-        && dir.join("expected").join("mario_20_clean_base.png").is_file()
+        && dir
+            .join("expected")
+            .join("mario_20_clean_base.png")
+            .is_file()
 }
 
 /// Minimal PNG loader for the tests (RGB8 out; indexed/RGBA/grey
@@ -40,7 +47,9 @@ fn load_png(path: &PathBuf) -> Result<Frame, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(|e| format!("png header {}: {e}", path.display()))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png header {}: {e}", path.display()))?;
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     let (color_type, _) = reader.output_color_type();
@@ -48,7 +57,9 @@ fn load_png(path: &PathBuf) -> Result<Frame, String> {
         .output_buffer_size()
         .ok_or_else(|| format!("png size unknown: {}", path.display()))?;
     let mut buf = vec![0u8; size];
-    let frame = reader.next_frame(&mut buf).map_err(|e| format!("png decode {}: {e}", path.display()))?;
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png decode {}: {e}", path.display()))?;
     let bytes = &buf[..frame.buffer_size()];
     let mut data = vec![0u8; w as usize * h as usize * 3];
     match color_type {
@@ -75,7 +86,10 @@ fn load_png(path: &PathBuf) -> Result<Frame, String> {
             }
         }
         png::ColorType::Indexed => {
-            return Err(format!("indexed PNG survived expansion: {}", path.display()));
+            return Err(format!(
+                "indexed PNG survived expansion: {}",
+                path.display()
+            ));
         }
     }
     Frame::new(w, h, PixelFormat::Rgb8, data).map_err(|e| e.to_string())
@@ -112,13 +126,23 @@ fn contour_matches_python_reference_at_4x() -> Result<(), String> {
     let algo = Contour;
     for name in ["ct", "eb", "ct2", "zelda", "mario", "ctnew"] {
         let input = load_png(&dir.join("inputs").join(format!("{name}.png")))?;
-        let expected = load_png(&dir.join("expected").join(format!("{name}_20_clean_base.png")))?;
+        let expected = load_png(
+            &dir.join("expected")
+                .join(format!("{name}_20_clean_base.png")),
+        )?;
         let out = algo.process(&input, 4).map_err(|e| e.to_string())?;
-        assert_eq!((out.width, out.height), (expected.width, expected.height), "{name}: size");
+        assert_eq!(
+            (out.width, out.height),
+            (expected.width, expected.height),
+            "{name}: size"
+        );
         let (max, over_one) = compare(&out, &expected);
         if name == "mario" {
             assert!(max <= 34, "mario: max abs diff {max}, limit 34");
-            assert!(over_one <= 10, "mario: {over_one} pixels differ by >1, limit 10");
+            assert!(
+                over_one <= 10,
+                "mario: {over_one} pixels differ by >1, limit 10"
+            );
         } else {
             assert!(max <= 1, "{name}: max abs diff {max}, limit 1");
             assert_eq!(over_one, 0, "{name}: {over_one} pixels differ by >1");
@@ -143,7 +167,8 @@ fn contour_2x_dimensions() -> Result<(), String> {
 
 #[test]
 fn nearest_sanity() -> Result<(), String> {
-    let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
+    let f =
+        Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
     let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
     assert_eq!((out.width, out.height), (4, 2));
     assert_eq!(out.pixel(0, 0), &[1, 2, 3]);

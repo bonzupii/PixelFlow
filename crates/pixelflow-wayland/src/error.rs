@@ -33,10 +33,16 @@ impl fmt::Display for WaylandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WaylandError::Portal(msg) => write!(f, "portal error: {msg}"),
-            WaylandError::SourceUnavailable { requested, available } => {
-                let offered: Vec<String> =
-                    available.iter().map(ToString::to_string).collect();
-                write!(f, "{requested} capture is not offered; portal offers: {}", offered.join(", "))
+            WaylandError::SourceUnavailable {
+                requested,
+                available,
+            } => {
+                let offered: Vec<String> = available.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "{requested} capture is not offered; portal offers: {}",
+                    offered.join(", ")
+                )
             }
             WaylandError::NoStream => write!(f, "portal returned no stream"),
             WaylandError::PipeWire(msg) => write!(f, "pipewire error: {msg}"),

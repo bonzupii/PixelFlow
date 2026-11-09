@@ -19,8 +19,10 @@ use pipewire::loop_::Timeout;
 use pipewire::main_loop::MainLoopBox;
 use pipewire::spa::buffer::DataType;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
-use pipewire::spa::param::{ParamType, format::FormatProperties, format::MediaSubtype, format::MediaType};
-use pipewire::spa::pod::{Pod, serialize::PodSerializer, Value};
+use pipewire::spa::param::{
+    ParamType, format::FormatProperties, format::MediaSubtype, format::MediaType,
+};
+use pipewire::spa::pod::{Pod, Value, serialize::PodSerializer};
 use pipewire::spa::utils::{Direction, Fraction, Rectangle};
 use pipewire::stream::{StreamBox, StreamFlags, StreamState};
 use pixelflow_core::Frame;
@@ -57,7 +59,10 @@ impl Shared {
 /// Record the first fatal stream error. Later errors are ignored so
 /// the first failure is the one reported.
 fn set_error(shared: &Shared, error: WaylandError) {
-    let mut slot = shared.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut slot = shared
+        .error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.is_none() {
         *slot = Some(error);
     }
@@ -127,16 +132,8 @@ fn build_format_params() -> Result<Vec<u8>, WaylandError> {
     let obj = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamFormat,
         ParamType::EnumFormat,
-        pw::spa::pod::property!(
-            FormatProperties::MediaType,
-            Id,
-            MediaType::Video
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::MediaSubtype,
-            Id,
-            MediaSubtype::Raw
-        ),
+        pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+        pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
         pw::spa::pod::property!(
             FormatProperties::VideoFormat,
             Choice,
@@ -155,9 +152,18 @@ fn build_format_params() -> Result<Vec<u8>, WaylandError> {
             Choice,
             Range,
             Rectangle,
-            Rectangle { width: 1920, height: 1080 },
-            Rectangle { width: 1, height: 1 },
-            Rectangle { width: 8192, height: 8192 }
+            Rectangle {
+                width: 1920,
+                height: 1080
+            },
+            Rectangle {
+                width: 1,
+                height: 1
+            },
+            Rectangle {
+                width: 8192,
+                height: 8192
+            }
         ),
         pw::spa::pod::property!(
             FormatProperties::VideoFramerate,
@@ -169,11 +175,10 @@ fn build_format_params() -> Result<Vec<u8>, WaylandError> {
             Fraction { num: 120, denom: 1 }
         ),
     );
-    let (cursor, _) = PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &Value::Object(obj),
-    )
-    .map_err(|e| WaylandError::PipeWire(format!("failed to build format parameters: {e}")))?;
+    let (cursor, _) =
+        PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj)).map_err(
+            |e| WaylandError::PipeWire(format!("failed to build format parameters: {e}")),
+        )?;
     Ok(cursor.into_inner())
 }
 
@@ -193,8 +198,7 @@ struct LoopSetup {
 /// checked regularly: the owning loop type cannot be cloned into a
 /// callback, so there is no channel that asks the loop to quit.
 fn run_loop_inner(setup: LoopSetup) -> Result<(), WaylandError> {
-    let main_loop = MainLoopBox::new(None)
-        .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
+    let main_loop = MainLoopBox::new(None).map_err(|e| WaylandError::PipeWire(e.to_string()))?;
     let context = ContextBox::new(main_loop.loop_(), None)
         .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
     let core = context
@@ -355,7 +359,11 @@ impl PipeWireCapture {
     /// The recorded stream error, if any. A poisoned lock yields its
     /// inner guard, the same policy `set_error` uses.
     fn check_error(&self) -> Option<WaylandError> {
-        let slot = self.shared.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slot = self
+            .shared
+            .error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         slot.as_ref().cloned()
     }
 
@@ -434,8 +442,8 @@ mod tests {
     use std::os::fd::OwnedFd;
 
     #[test]
-    fn start_with_a_non_pipewire_fd_is_an_error_not_a_panic(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn start_with_a_non_pipewire_fd_is_an_error_not_a_panic()
+    -> Result<(), Box<dyn std::error::Error>> {
         let file = File::open("/dev/null")?;
         let fd = OwnedFd::from(file);
         let result = PipeWireCapture::start(fd, 42);

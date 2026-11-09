@@ -84,7 +84,13 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     let scale = opts.scale;
     let program = opts.program.clone();
     let worker = std::thread::spawn(move || -> Result<(), String> {
-        run_processing(&mut backend, &mut launcher, scale, frame_tx, processing_exit)
+        run_processing(
+            &mut backend,
+            &mut launcher,
+            scale,
+            frame_tx,
+            processing_exit,
+        )
     });
     let present_result = pixelflow_present::run(opts.windowed, frame_rx, exit.clone());
     exit.store(true, Ordering::Relaxed);
@@ -92,7 +98,9 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         Ok(result) => result,
         Err(_) => Err(format!("{program}: processing thread ended unexpectedly")),
     };
-    let present_error = present_result.err().map(|e| format!("presentation failed: {e}"));
+    let present_error = present_result
+        .err()
+        .map(|e| format!("presentation failed: {e}"));
     match (present_error, worker_result) {
         (None, Ok(())) => Ok(()),
         (Some(e), Ok(())) => Err(e),

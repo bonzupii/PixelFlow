@@ -42,7 +42,9 @@ impl Launcher {
         if self.exited() {
             return Ok(());
         }
-        self.child.kill().map_err(|e| format!("failed to stop child: {e}"))?;
+        self.child
+            .kill()
+            .map_err(|e| format!("failed to stop child: {e}"))?;
         match self.child.wait() {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("failed to wait for child: {e}")),

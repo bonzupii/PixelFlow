@@ -13,7 +13,9 @@ pub fn load_png(path: &str) -> Result<Frame, String> {
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     // Expand palette / tRNS / sub-8-bit grey to 8-bit RGB(A).
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png header: {e}"))?;
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     let (color_type, _) = reader.output_color_type();
@@ -21,7 +23,9 @@ pub fn load_png(path: &str) -> Result<Frame, String> {
         .output_buffer_size()
         .ok_or_else(|| "png: output size unknown".to_string())?;
     let mut buf = vec![0u8; size];
-    let frame = reader.next_frame(&mut buf).map_err(|e| format!("png decode: {e}"))?;
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png decode: {e}"))?;
     let bytes = &buf[..frame.buffer_size()];
     let mut data = vec![0u8; w as usize * h as usize * 3];
     match color_type {
@@ -67,6 +71,8 @@ pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header().map_err(|e| format!("png header: {e}"))?;
-    writer.write_image_data(&frame.data).map_err(|e| format!("png write: {e}"))?;
+    writer
+        .write_image_data(&frame.data)
+        .map_err(|e| format!("png write: {e}"))?;
     Ok(())
 }

@@ -83,7 +83,11 @@ pub fn packed_to_frame(
     }
     let start = offset as usize;
     let needed = start
-        .checked_add(stride.saturating_mul(height as usize - 1).saturating_add(row_bytes))
+        .checked_add(
+            stride
+                .saturating_mul(height as usize - 1)
+                .saturating_add(row_bytes),
+        )
         .ok_or_else(|| WaylandError::InvalidFrame("frame size overflows".to_string()))?;
     if data.len() < needed {
         let len = data.len();
