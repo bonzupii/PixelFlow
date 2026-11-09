@@ -293,7 +293,6 @@ fn scale2x(a: &UImg) -> UImg {
             let h_ = id_at(yy + 1, xx);
             let d = id_at(yy, xx - 1);
             let f = id_at(yy, xx + 1);
-            let e = ids[y * a.w + x];
             let ad = a.getf(y, (xx - 1).max(0) as usize);
             let af = a.getf(y, (xx + 1).min(a.w as i64 - 1) as usize);
             let centre = a.getf(y, x);
@@ -301,7 +300,6 @@ fn scale2x(a: &UImg) -> UImg {
             let c1 = b == f && b != d && f != h_;
             let c2 = d == h_ && d != b && h_ != f;
             let c3 = h_ == f && d != h_ && b != f;
-            let _ = e;
             let mut q = |dy: usize, dx: usize, p: [f32; 3]| {
                 let i = ((y * 2 + dy) * out.w + (x * 2 + dx)) * 3;
                 out.d[i] = clamp_f(p[0].round(), 0.0, 255.0) as u8;
@@ -768,8 +766,8 @@ fn sg_kernels(win: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
 
 /// Local quadratic fit of samples v(t), algos4._fit_run.
 /// Returns (fitted, slope, curvature, rms residual).
-fn fit_run(t: &[f64], v: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, f64)> {
-    let n = t.len();
+fn fit_run(v: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, f64)> {
+    let n = v.len();
     let w = std::cmp::min(11, if n % 2 == 1 { n } else { n - 1 });
     if w < 7 {
         return None;
@@ -800,7 +798,6 @@ fn fit_run(t: &[f64], v: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, f64)> 
     let d = conv(&kd);
     let c2 = conv(&k2);
     let rms = (v.iter().zip(f.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / n as f64).sqrt();
-    let _ = t;
     Some((f, d, c2, rms))
 }
 
@@ -906,7 +903,7 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
             }
             let t: Vec<f64> = r.t.iter().map(|v| *v as f64).collect();
             let v = r.v.clone();
-            let Some((f, slope, c2, rms)) = fit_run(&t, &v) else { continue };
+            let Some((f, slope, c2, rms)) = fit_run(&v) else { continue };
             if rms > max_rms {
                 continue;
             }
