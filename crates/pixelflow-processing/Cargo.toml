@@ -1,0 +1,11 @@
+[package]
+name = "pixelflow-processing"
+version = "0.1.0"
+edition = "2021"
+description = "PixelFlow image processing algorithms"
+
+[dependencies]
+pixelflow-core = { workspace = true }
+
+[dev-dependencies]
+png = { workspace = true }
