@@ -37,6 +37,11 @@ impl std::error::Error for FrameError {}
 impl Frame {
     /// Build a frame, checking the buffer length against the dimensions
     /// and format. Returns an error instead of a short or long buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] when the buffer length does not equal
+    /// `width * height * format.bytes_per_pixel()`.
     pub fn new(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Result<Frame, FrameError> {
         let expected = width as usize * height as usize * format.bytes_per_pixel();
         if data.len() != expected {
@@ -55,22 +60,26 @@ impl Frame {
     }
 
     /// Build a frame filled with one repeated byte value.
+    #[must_use]
     pub fn filled(width: u32, height: u32, format: PixelFormat, value: u8) -> Frame {
         let len = width as usize * height as usize * format.bytes_per_pixel();
         Frame { width, height, format, data: vec![value; len] }
     }
 
     /// Bytes per pixel, from the format.
+    #[must_use]
     pub fn bytes_per_pixel(&self) -> usize {
         self.format.bytes_per_pixel()
     }
 
     /// Byte offset of pixel (x, y) in the data buffer.
+    #[must_use]
     pub fn pixel_offset(&self, x: u32, y: u32) -> usize {
         (y as usize * self.width as usize + x as usize) * self.bytes_per_pixel()
     }
 
     /// The channels of pixel (x, y) as a slice.
+    #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> &[u8] {
         let off = self.pixel_offset(x, y);
         &self.data[off..off + self.bytes_per_pixel()]
@@ -86,12 +95,13 @@ impl Frame {
     /// Convert to RGB8, dropping alpha and expanding grey. The
     /// processing pipeline works on RGB8; this is the single place
     /// that conversion lives.
+    #[must_use]
     pub fn to_rgb8(&self) -> Frame {
         match self.format {
             PixelFormat::Rgb8 => self.clone(),
             PixelFormat::Rgba8 => {
                 let mut data = Vec::with_capacity(self.width as usize * self.height as usize * 3);
-                for px in self.data.chunks_exact(4) {
+                for px in self.data.as_chunks::<4>().0 {
                     data.extend_from_slice(&px[..3]);
                 }
                 Frame { width: self.width, height: self.height, format: PixelFormat::Rgb8, data }
@@ -108,6 +118,7 @@ impl Frame {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

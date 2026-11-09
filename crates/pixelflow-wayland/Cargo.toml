@@ -1,0 +1,15 @@
+[package]
+name = "pixelflow-wayland"
+version = "0.1.0"
+edition = "2024"
+description = "PixelFlow Wayland capture backend: XDG Desktop Portal ScreenCast and PipeWire"
+
+[dependencies]
+pixelflow-core = { workspace = true }
+pixelflow-capture = { workspace = true }
+ashpd = { workspace = true }
+pipewire = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

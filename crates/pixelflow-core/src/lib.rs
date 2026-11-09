@@ -1,4 +1,4 @@
-//! PixelFlow core: frame representation, pixel formats, and the
+//! `PixelFlow` core: frame representation, pixel formats, and the
 //! processing pipeline interface. No platform code and no I/O live
 //! here; every other crate depends on this one.
 

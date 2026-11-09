@@ -46,6 +46,7 @@ impl Processor for Nearest {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

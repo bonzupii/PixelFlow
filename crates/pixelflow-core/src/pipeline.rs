@@ -20,6 +20,11 @@ pub trait Processor {
     /// Process one frame. The input frame's format must be RGB8; use
     /// [`Frame::to_rgb8`] first for anything else. The output frame
     /// is RGB8 at `width * scale` by `height * scale`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] for an unsupported scale factor, an
+    /// unsupported input format, or an internal algorithm failure.
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError>;
 }
 
@@ -27,9 +32,19 @@ pub trait Processor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessError {
     /// The requested scale factor is not supported by this algorithm.
-    UnsupportedScale { algorithm: &'static str, scale: u32 },
+    UnsupportedScale {
+        /// Name of the algorithm that rejected the scale factor.
+        algorithm: &'static str,
+        /// The scale factor that was requested.
+        scale: u32,
+    },
     /// The input frame is not in a format this algorithm accepts.
-    UnsupportedFormat { algorithm: &'static str, format: String },
+    UnsupportedFormat {
+        /// Name of the algorithm that rejected the format.
+        algorithm: &'static str,
+        /// The frame format that was supplied, as a string.
+        format: String,
+    },
     /// The algorithm failed internally; the message says why.
     Internal(String),
 }

@@ -10,8 +10,8 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.99"
 license = "Apache-2.0"
 authors = ["Bonzupii"]
 
@@ -22,9 +22,23 @@ pixelflow-capture = { path = "crates/pixelflow-capture" }
 pixelflow-wayland = { path = "crates/pixelflow-wayland" }
 pixelflow-present = { path = "crates/pixelflow-present" }
 clap = { version = "4", features = ["derive"] }
-png = "0.17"
-ashpd = "0.14"
-pipewire = "0.8"
+png = "0.18"
+ashpd = { version = "0.14", features = ["screencast", "pipewire"] }
+pipewire = "0.10"
 tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
 wgpu = "30"
 winit = "0.30"
+pollster = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

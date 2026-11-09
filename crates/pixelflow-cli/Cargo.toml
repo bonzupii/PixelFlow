@@ -1,7 +1,7 @@
 [package]
 name = "pixelflow-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "PixelFlow command-line interface"
 
 [[bin]]
@@ -11,5 +11,11 @@ path = "src/main.rs"
 [dependencies]
 pixelflow-core = { workspace = true }
 pixelflow-processing = { workspace = true }
+pixelflow-capture = { workspace = true }
+pixelflow-wayland = { workspace = true }
+pixelflow-present = { workspace = true }
 clap = { workspace = true }
 png = { workspace = true }
+
+[lints]
+workspace = true

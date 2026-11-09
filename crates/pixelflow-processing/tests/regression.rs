@@ -14,6 +14,8 @@
 //! float comparison at a near-tie. That is the reference port's own
 //! behaviour, not a regression in this crate.
 
+// Test code may unwrap and panic: these are test helpers, not library code.
+#![allow(clippy::unwrap_used, clippy::panic)]
 use pixelflow_core::{Frame, PixelFormat, Processor};
 use pixelflow_processing::{Nearest, Upscale20};
 use std::path::PathBuf;
@@ -38,13 +40,13 @@ fn fixtures_present(dir: &PathBuf) -> bool {
 /// inputs are expanded by the decoder, alpha dropped).
 fn load_png(path: &PathBuf) -> Frame {
     let file = std::fs::File::open(path).unwrap();
-    let mut decoder = png::Decoder::new(file);
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().unwrap();
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     let (color_type, _) = reader.output_color_type();
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
     let frame = reader.next_frame(&mut buf).unwrap();
     let bytes = &buf[..frame.buffer_size()];
     let mut data = vec![0u8; w as usize * h as usize * 3];

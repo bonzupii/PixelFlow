@@ -1,4 +1,4 @@
-//! Pixel format definitions, shared by every PixelFlow crate.
+//! Pixel format definitions, shared by every `PixelFlow` crate.
 
 use std::fmt;
 
@@ -15,6 +15,7 @@ pub enum PixelFormat {
 
 impl PixelFormat {
     /// Bytes per pixel in this format.
+    #[must_use]
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             PixelFormat::Rgb8 => 3,
@@ -24,11 +25,13 @@ impl PixelFormat {
     }
 
     /// Number of channels in this format.
+    #[must_use]
     pub fn channels(self) -> usize {
         self.bytes_per_pixel()
     }
 
     /// Whether this format carries an alpha channel.
+    #[must_use]
     pub fn has_alpha(self) -> bool {
         matches!(self, PixelFormat::Rgba8)
     }

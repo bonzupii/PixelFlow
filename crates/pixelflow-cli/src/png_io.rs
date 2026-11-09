@@ -10,14 +10,17 @@ use std::io::BufWriter;
 /// greyscale inputs are expanded to RGB8 on decode; alpha is dropped.
 pub fn load_png(path: &str) -> Result<Frame, String> {
     let file = File::open(path).map_err(|e| format!("open {path}: {e}"))?;
-    let mut decoder = png::Decoder::new(file);
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     // Expand palette / tRNS / sub-8-bit grey to 8-bit RGB(A).
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     let (color_type, _) = reader.output_color_type();
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| "png: output size unknown".to_string())?;
+    let mut buf = vec![0u8; size];
     let frame = reader.next_frame(&mut buf).map_err(|e| format!("png decode: {e}"))?;
     let bytes = &buf[..frame.buffer_size()];
     let mut data = vec![0u8; w as usize * h as usize * 3];

@@ -36,6 +36,7 @@ impl Default for CaptureConfig {
 
 impl CaptureConfig {
     /// Configuration for the given source kind.
+    #[must_use]
     pub fn new(source: SourceKind) -> CaptureConfig {
         CaptureConfig { source }
     }

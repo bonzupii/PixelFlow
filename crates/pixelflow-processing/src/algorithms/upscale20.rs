@@ -1,6 +1,24 @@
 //! Algorithm 20 from the retro upscaler experiments, as a library.
 //!
-//! 20 = 12 (combined) + edge_follow2, with no dither source anywhere.
+//! 20 = 12 (combined) + `edge_follow2`, with no dither source anywhere.
+//
+// This file is a line-for-line transliteration of the Python reference
+// (upscale-experiments rounds 1-6, algos1-6.py). Its numeric output is
+// pinned by the pixel regression test, not by lints: the casts, the
+// literal constants, the single-letter variables, and the long functions
+// are the reference's own notation, and rewriting them would break the
+// audit trail to the Python. Those four lint families are allowed here
+// and nowhere else; every other lint still applies to this file.
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::unreadable_literal
+)]
 //! The code below is the standalone Rust port from
 //! `upscale20/src/main.rs`, moved here verbatim: the mathematical
 //! operations, float widths, gates, and the hardcoded Savitzky-Golay
@@ -94,7 +112,7 @@ fn reflect_idx(mut i: i64, n: i64) -> i64 {
     }
 }
 
-/// shifted(a, dy, dx): a[y+dy][x+dx] with edge clamping, like algos1.shifted.
+/// shifted(a, dy, dx): a[y+dy][x+dx] with edge clamping, like `algos1.shifted`.
 fn shifted_u(a: &UImg, dy: i64, dx: i64) -> UImg {
     let mut out = UImg { w: a.w, h: a.h, d: vec![0; a.d.len()] };
     for y in 0..a.h {
@@ -125,8 +143,8 @@ fn shifted_b(a: &[bool], w: usize, h: usize, dy: i64, dx: i64) -> Vec<bool> {
 
 fn color_ids(a: &UImg) -> Vec<u32> {
     let mut out = vec![0u32; a.w * a.h];
-    for i in 0..a.w * a.h {
-        out[i] = ((a.d[i * 3] as u32) << 16) | ((a.d[i * 3 + 1] as u32) << 8) | a.d[i * 3 + 2] as u32;
+    for (i, px) in a.d.as_chunks::<3>().0.iter().enumerate() {
+        out[i] = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
     }
     out
 }
@@ -146,11 +164,14 @@ fn erf(x: f64) -> f64 {
     s * (1.0 - poly * (-ax * ax).exp())
 }
 
+// Not a midpoint: this is the Abramowitz-Stegun normal CDF shape,
+// 0.5 * (1 + erf(x / sqrt(2))); rewriting it would change rounding.
+#[allow(clippy::manual_midpoint)]
 fn phi(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
 }
 
-/// Gaussian coverage taps over ks = [-1, 0, 1], like algos1._taps.
+/// Gaussian coverage taps over ks = [-1, 0, 1], like `algos1._taps`.
 fn taps(u: f32, sig: f32) -> [f32; 3] {
     let ks = [-1.0f64, 0.0, 1.0];
     let mut w = [0.0f64; 3];
@@ -163,7 +184,7 @@ fn taps(u: f32, sig: f32) -> [f32; 3] {
 }
 
 // ---------------------------------------------------------------- blur
-/// Separable gaussian blur, scipy gaussian_filter semantics:
+/// Separable gaussian blur, scipy `gaussian_filter` semantics:
 /// sigma, truncate 4.0 (radius ceil(4*sigma)), mode 'reflect', per axis.
 fn gaussian_blur(a: &FImg, sigma: f32) -> FImg {
     if sigma <= 0.0 {
@@ -177,7 +198,7 @@ fn gaussian_blur(a: &FImg, sigma: f32) -> FImg {
         kern.push(v);
         sum += v;
     }
-    for v in kern.iter_mut() {
+    for v in &mut kern {
         *v /= sum;
     }
     let mut tmp = FImg::new(a.w, a.h);
@@ -213,7 +234,7 @@ fn gaussian_blur(a: &FImg, sigma: f32) -> FImg {
     out
 }
 
-/// 3x3 box blur, scipy uniform_filter size (3,3,1), mode 'reflect'.
+/// 3x3 box blur, scipy `uniform_filter` size (3,3,1), mode 'reflect'.
 fn uniform3(a: &FImg) -> FImg {
     let mut tmp = FImg::new(a.w, a.h);
     for y in 0..a.h {
@@ -277,7 +298,7 @@ fn nearest(a: &UImg, s: usize) -> FImg {
     out
 }
 
-/// Scale2x / EPX, one doubling, like algos1.scale2x.
+/// Scale2x / EPX, one doubling, like `algos1.scale2x`.
 fn scale2x(a: &UImg) -> UImg {
     let ids = color_ids(a);
     let id_at = |y: i64, x: i64| -> u32 {
@@ -326,7 +347,7 @@ fn scalenx(a: &UImg, s: usize) -> UImg {
 }
 
 // ---------------------------------------------------------------- 07 dither
-/// Pair-consistent 2x2 checker mask, algos2.dither_mask. Fires only
+/// Pair-consistent 2x2 checker mask, `algos2.dither_mask`. Fires only
 /// where a checker cell's colour pair repeats 2 px away.
 fn dither_mask(a: &UImg) -> Vec<bool> {
     let ids = color_ids(a);
@@ -431,7 +452,7 @@ const OFFS: [(i64, i64); 9] = [
     (1, -1), (1, 0), (1, 1),
 ];
 
-/// 08: contrast-adaptive sharp labelset, algos2.labelset_adaptive.
+/// 08: contrast-adaptive sharp labelset, `algos2.labelset_adaptive`.
 fn labelset_adaptive(a: &UImg, s: usize) -> FImg {
     let sig = 0.35f32;
     let (w, h) = (a.w, a.h);
@@ -517,7 +538,7 @@ fn labelset_adaptive(a: &UImg, s: usize) -> FImg {
 }
 
 // ---------------------------------------------------------------- 09 / 12
-/// 09's low-contrast merge, algos2.merge_low_contrast: average each
+/// 09's low-contrast merge, `algos2.merge_low_contrast`: average each
 /// source pixel with 3x3 neighbours within T=40 RGB, self weight 1.5.
 fn merge_low_contrast(a: &UImg) -> FImg {
     let (w, h) = (a.w, a.h);
@@ -560,7 +581,7 @@ fn merge_low_contrast(a: &UImg) -> FImg {
 }
 
 /// Smooth neighbourhoods: at most 2 distinct colours in 3x3 and
-/// local std < 12, algos3.smooth_mask.
+/// local std < 12, `algos3.smooth_mask`.
 fn smooth_mask(a: &UImg) -> Vec<bool> {
     let (w, h) = (a.w, a.h);
     let ids = color_ids(a);
@@ -619,7 +640,7 @@ fn smooth_mask(a: &UImg) -> Vec<bool> {
     out
 }
 
-/// 09's merge, gated to smooth neighbourhoods, algos3.gated_merge.
+/// 09's merge, gated to smooth neighbourhoods, `algos3.gated_merge`.
 fn gated_merge(a: &UImg) -> FImg {
     let merged = merge_low_contrast(a);
     let gate = smooth_mask(a);
@@ -632,7 +653,7 @@ fn gated_merge(a: &UImg) -> FImg {
     out
 }
 
-/// 11's grain at low strength, algos3.grain_layer.
+/// 11's grain at low strength, `algos3.grain_layer`.
 fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
     let near = nearest(a, s);
     let blur = gaussian_blur(&near, 1.0);
@@ -669,7 +690,7 @@ fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
     out
 }
 
-/// Hard-light blend, algos2.hardlight.
+/// Hard-light blend, `algos2.hardlight`.
 fn hardlight(base: &FImg, top: &FImg) -> FImg {
     let mut out = FImg::new(base.w, base.h);
     for i in 0..base.w * base.h {
@@ -683,7 +704,7 @@ fn hardlight(base: &FImg, top: &FImg) -> FImg {
     out
 }
 
-/// 12: the combined recipe, algos3.combined.
+/// 12: the combined recipe, `algos3.combined`.
 fn combined(a: &UImg, s: usize) -> FImg {
     let merged = gated_merge(a);
     let src = UImg {
@@ -735,14 +756,14 @@ fn combined(a: &UImg, s: usize) -> FImg {
 /// Savitzky-Golay kernels for an odd window, quadratic fit, evaluated
 /// at centre: (value, derivative, curvature) weights. These are the
 /// exact f64 values numpy's pinv(Vandermonde) returns in algos4
-/// (_sg_kernel), hardcoded: the follower's apex gate reads the *sign*
+/// (`_sg_kernel`), hardcoded: the follower's apex gate reads the *sign*
 /// of the fitted slope, and at the flat points of a staircase the
 /// slope is exactly 0 in exact arithmetic, so its sign is whatever
 /// the pinv's ~1e-15 rounding noise says. Recomputing the kernels
 /// from the normal equations gives a different noise sign and flips
 /// the gate on ~14 samples of a long run. The tables below are the
-/// only windows fit_run can ask for (7, 9, 11).
-fn sg_kernels(win: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+/// only windows `fit_run` can ask for (7, 9, 11).
+fn sg_kernels(win: usize) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let (kv, kd, k2): (&[f64], &[f64], &[f64]) = match win {
         7 => (
             &[-0.09523809523809519, 0.1428571428571429, 0.2857142857142856, 0.33333333333333326, 0.2857142857142856, 0.14285714285714282, -0.0952380952380952],
@@ -759,20 +780,23 @@ fn sg_kernels(win: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             &[-0.04545454545454544, -0.03636363636363638, -0.027272727272727282, -0.0181818181818182, -0.009090909090909101, -5.9045068634225964e-18, 0.00909090909090909, 0.018181818181818188, 0.02727272727272728, 0.03636363636363638, 0.045454545454545484],
             &[0.01748251748251747, 0.006993006993006988, -0.0011655011655011607, -0.0069930069930069965, -0.01048951048951049, -0.011655011655011656, -0.010489510489510492, -0.006993006993006992, -0.001165501165501165, 0.006993006993006996, 0.017482517482517484],
         ),
-        _ => panic!("sg_kernels: unsupported window {win}"),
+        _ => return None,
     };
-    (kv.to_vec(), kd.to_vec(), k2.to_vec())
+    Some((kv.to_vec(), kd.to_vec(), k2.to_vec()))
 }
 
-/// Local quadratic fit of samples v(t), algos4._fit_run.
+/// Local quadratic fit of samples v(t), `algos4._fit_run`.
 /// Returns (fitted, slope, curvature, rms residual).
-fn fit_run(v: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, f64)> {
+/// Fitted curve, slope, curvature, and RMS residual from [`fit_run`].
+type FitResult = (Vec<f64>, Vec<f64>, Vec<f64>, f64);
+
+fn fit_run(v: &[f64]) -> Option<FitResult> {
     let n = v.len();
     let w = std::cmp::min(11, if n % 2 == 1 { n } else { n - 1 });
     if w < 7 {
         return None;
     }
-    let (kv, kd, k2) = sg_kernels(w);
+    let (kv, kd, k2) = sg_kernels(w)?;
     let h = w / 2;
     // pad v by edge replication
     let mut vp = Vec::with_capacity(n + 2 * h);
@@ -816,7 +840,7 @@ struct RawRun {
     last_y: f64,
 }
 
-/// Coherent boundary runs, algos5.find_runs2 (apex + scaled min_len).
+/// Coherent boundary runs, `algos5.find_runs2` (apex + scaled `min_len`).
 fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
     let min_len = if std::cmp::min(a.h, a.w) >= 200 { 24usize } else { 12usize };
     let min_contrast = 50.0f32;
@@ -882,11 +906,10 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
                 }
             }
             let mut still: Vec<RawRun> = Vec::new();
-            for r in active.into_iter() {
-                if *r.t.last().unwrap() == j as i64 {
-                    still.push(r);
-                } else {
-                    done.push(r);
+            for r in active {
+                match r.t.last() {
+                    Some(&last) if last == j as i64 => still.push(r),
+                    _ => done.push(r),
                 }
             }
             active = still;
@@ -910,15 +933,13 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
             let n = v.len();
             let mut ok: Vec<bool> = slope.iter().map(|s| s.abs() <= max_slope).collect();
             // apex: slope sign changes mark a peak/valley
-            let sgn: Vec<f64> = slope.iter().map(|s| if *s > 0.0 { 1.0 } else if *s < 0.0 { -1.0 } else { 0.0 }).collect();
+            let sgn: Vec<i8> = slope.iter().map(|s| if *s > 0.0 { 1 } else if *s < 0.0 { -1 } else { 0 }).collect();
             let mut apex = vec![false; n];
             for i in 0..n - 1 {
                 if sgn[i + 1] != sgn[i] {
                     let lo = i.saturating_sub(1);
                     let hi = std::cmp::min(n, i + 3);
-                    for k in lo..hi {
-                        apex[k] = true;
-                    }
+                    apex[lo..hi].fill(true);
                 }
             }
             for i in 0..n {
@@ -926,21 +947,19 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
                 ok[i] = ok[i] && curv_ok;
             }
             // monotonicity with one sign change allowed per 7-sample window
-            for i in 0..n {
+            for (i, _) in v.iter().enumerate() {
                 let lo = i.saturating_sub(3);
                 let hi = std::cmp::min(n, i + 4);
                 let mut changes = 0i32;
-                let mut prev: Option<f64> = None;
+                let mut prev: Option<i8> = None;
                 for k in lo..hi - 1 {
                     let d = v[k + 1] - v[k];
                     if d == 0.0 {
                         continue;
                     }
-                    let s = if d > 0.0 { 1.0 } else { -1.0 };
-                    if let Some(p) = prev {
-                        if s != p {
-                            changes += 1;
-                        }
+                    let s: i8 = if d > 0.0 { 1 } else { -1 };
+                    if let Some(p) = prev && s != p {
+                        changes += 1;
                     }
                     prev = Some(s);
                 }
@@ -957,12 +976,12 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
                     t[0],
                     t[t.len() - 1],
                     t.len(),
-                    v.iter().cloned().fold(f64::INFINITY, f64::min),
-                    v.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                    v.iter().copied().fold(f64::INFINITY, f64::min),
+                    v.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                     rms,
                     ok.iter().filter(|b| **b).count()
                 );
-                if t[0] == 0.0 && t[t.len() - 1] == 242.0 {
+                if t[0] as i64 == 0 && t[t.len() - 1] as i64 == 242 {
                     eprintln!("rs ok: {}", ok.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>());
                     eprintln!("rs c2: {:?}", c2.iter().take(20).map(|v| (v * 10000.0).round() / 10000.0).collect::<Vec<_>>());
                 }
@@ -976,7 +995,7 @@ fn find_runs2(a: &UImg) -> (Vec<Run>, Vec<Run>) {
 }
 
 /// Sample the source profile along `axis` at line `idx` and continuous
-/// coordinates `c`, algos4._profile_sample_vec. Transition width
+/// coordinates `c`, `algos4._profile_sample_vec`. Transition width
 /// 0.25 source px, centred on the row/column boundary, smoothstep.
 fn profile_sample_vec(a: &UImg, axis: usize, idx: usize, c: &[f64]) -> Vec<[f32; 3]> {
     let n = if axis == 0 { a.h } else { a.w } as i64;
@@ -1002,18 +1021,20 @@ fn profile_sample_vec(a: &UImg, axis: usize, idx: usize, c: &[f64]) -> Vec<[f32;
         .collect()
 }
 
-fn interp(x: f64, xs: &[f64], ys: &[f64]) -> f64 {
+fn interp(x: f64, xs: &[f64], ys: &[f64]) -> Option<f64> {
     // np.interp: linear, clamped at the ends
-    if x <= xs[0] {
-        return ys[0];
+    let (&x_first, &y_first) = (xs.first()?, ys.first()?);
+    if x <= x_first {
+        return Some(y_first);
     }
-    if x >= *xs.last().unwrap() {
-        return *ys.last().unwrap();
+    let (&x_last, &y_last) = (xs.last()?, ys.last()?);
+    if x >= x_last {
+        return Some(y_last);
     }
     let mut lo = 0usize;
     let mut hi = xs.len() - 1;
     while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
+        let mid = lo.midpoint(hi);
         if xs[mid] <= x {
             lo = mid;
         } else {
@@ -1021,7 +1042,7 @@ fn interp(x: f64, xs: &[f64], ys: &[f64]) -> f64 {
         }
     }
     let t = (x - xs[lo]) / (xs[hi] - xs[lo]);
-    ys[lo] + t * (ys[hi] - ys[lo])
+    Some(ys[lo] + t * (ys[hi] - ys[lo]))
 }
 
 struct Stats {
@@ -1032,26 +1053,27 @@ struct Stats {
     touched_frac: f64,
 }
 
-/// edge_follow2, algos5.edge_follow2: re-render coherent runs at
+/// `edge_follow2`, `algos5.edge_follow2`: re-render coherent runs at
 /// their fitted subpixel positions by shifting the source profile.
 fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
     let (h, w) = (a.h, a.w);
     let mut out = base.clone();
     let (h_runs, v_runs) = find_runs2(a);
-    let stats_h_runs = h_runs.len();
-    let stats_v_runs = v_runs.len();
-    let stats_h_len: usize = h_runs.iter().map(|r| r.t.len()).sum();
-    let stats_v_len: usize = v_runs.iter().map(|r| r.t.len()).sum();
+    let horizontal_runs = h_runs.len();
+    let vertical_runs = v_runs.len();
+    let horizontal_len: usize = h_runs.iter().map(|r| r.t.len()).sum();
+    let vertical_len: usize = v_runs.iter().map(|r| r.t.len()).sum();
     let mut best = vec![f32::INFINITY; w * s * h * s];
     let mut touched = vec![false; w * s * h * s];
     let band = 2.5f64;
 
     let apply = |run: &Run, axis: usize, out: &mut FImg, best: &mut [f32], touched: &mut [bool]| {
         let t = &run.t;
+        let Some(&t_last) = t.last() else { return };
         let v_arr = &run.v;
         let w_arr = uniform1d_nearest(&run.ok.iter().map(|b| if *b { 1.0f32 } else { 0.0 }).collect::<Vec<_>>());
         let t0 = t[0] as i64;
-        let t1 = *t.last().unwrap() as i64;
+        let t1 = t_last as i64;
         for u in t0..=t1 {
             // searchsorted left, clamped
             let mut k = t.partition_point(|&tv| tv < u as f64);
@@ -1066,10 +1088,10 @@ fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
                 // output columns inside source column u
                 let ous: Vec<usize> = (u as usize * s..(u as usize + 1) * s).collect();
                 let us: Vec<f64> = ous.iter().map(|o| (*o as f64 + 0.5) / s as f64).collect();
-                let f: Vec<f64> = us.iter().map(|&uu| interp(uu, t, &run.f)).collect();
-                let wgt: Vec<f64> = us.iter().map(|&uu| interp(uu, t, &w_arr.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect();
-                let fmin = f.iter().cloned().fold(f64::INFINITY, f64::min);
-                let fmax = f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let Some(f) = us.iter().map(|&uu| interp(uu, t, &run.f)).collect::<Option<Vec<f64>>>() else { return };
+                let Some(wgt) = us.iter().map(|&uu| interp(uu, t, &w_arr.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect::<Option<Vec<f64>>>() else { return };
+                let fmin = f.iter().copied().fold(f64::INFINITY, f64::min);
+                let fmax = f.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let oy0 = ((((fmin - band) * s as f64).floor() as i64).max(0)) as usize;
                 let oy1 = ((((fmax + band) * s as f64).ceil() as i64) + 1).min((h * s) as i64) as usize;
                 if oy0 >= oy1 {
@@ -1109,10 +1131,10 @@ fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
             } else {
                 let ous: Vec<usize> = (u as usize * s..(u as usize + 1) * s).collect();
                 let us: Vec<f64> = ous.iter().map(|o| (*o as f64 + 0.5) / s as f64).collect();
-                let f: Vec<f64> = us.iter().map(|&uu| interp(uu, t, &run.f)).collect();
-                let wgt: Vec<f64> = us.iter().map(|&uu| interp(uu, t, &w_arr.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect();
-                let fmin = f.iter().cloned().fold(f64::INFINITY, f64::min);
-                let fmax = f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let Some(f) = us.iter().map(|&uu| interp(uu, t, &run.f)).collect::<Option<Vec<f64>>>() else { return };
+                let Some(wgt) = us.iter().map(|&uu| interp(uu, t, &w_arr.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect::<Option<Vec<f64>>>() else { return };
+                let fmin = f.iter().copied().fold(f64::INFINITY, f64::min);
+                let fmax = f.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let ox0 = ((((fmin - band) * s as f64).floor() as i64).max(0)) as usize;
                 let ox1 = ((((fmax + band) * s as f64).ceil() as i64) + 1).min((w * s) as i64) as usize;
                 if ox0 >= ox1 {
@@ -1162,12 +1184,12 @@ fn edge_follow2(base: &FImg, a: &UImg, s: usize) -> (FImg, Stats) {
     let touched_frac = touched.iter().filter(|b| **b).count() as f64 / touched.len() as f64;
     (
         out,
-        Stats { h_runs: stats_h_runs, v_runs: stats_v_runs, h_len: stats_h_len, v_len: stats_v_len, touched_frac },
+        Stats { h_runs: horizontal_runs, v_runs: vertical_runs, h_len: horizontal_len, v_len: vertical_len, touched_frac },
     )
 }
 
-/// 20: 12 combined, then edge_follow2. No dither source anywhere.
-/// UPSCALE20_NO_FOLLOW=1 skips the follower (12 only), for testing.
+/// 20: 12 combined, then `edge_follow2`. No dither source anywhere.
+/// `UPSCALE20_NO_FOLLOW`=1 skips the follower (12 only), for testing.
 fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
     let base = combined(a, s);
     if std::env::var("UPSCALE20_NO_FOLLOW").is_ok() {
@@ -1177,7 +1199,7 @@ fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
 }
 
 // ---------------------------------------------------------------- adapter
-/// Algorithm 20 as a [`Processor`]: 12 (combined) + edge_follow2, no
+/// Algorithm 20 as a [`Processor`]: 12 (combined) + `edge_follow2`, no
 /// dither source anywhere. Input must be RGB8; output is RGB8 at
 /// `width * scale` by `height * scale`.
 pub struct Upscale20;

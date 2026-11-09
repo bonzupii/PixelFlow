@@ -1,0 +1,14 @@
+[package]
+name = "pixelflow-present"
+version = "0.1.0"
+edition = "2024"
+description = "PixelFlow presentation: fullscreen wgpu window"
+
+[dependencies]
+pixelflow-core = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+
+[lints]
+workspace = true

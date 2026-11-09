@@ -1,8 +1,11 @@
 [package]
 name = "pixelflow-capture"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "PixelFlow capture backend interface"
 
 [dependencies]
 pixelflow-core = { workspace = true }
+
+[lints]
+workspace = true

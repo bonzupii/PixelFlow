@@ -1,4 +1,4 @@
-//! PixelFlow image processing algorithms.
+//! `PixelFlow` image processing algorithms.
 //!
 //! Each algorithm implements [`pixelflow_core::Processor`]: one frame
 //! in, one frame out, an integer scale factor. Algorithms are pure
