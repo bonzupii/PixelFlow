@@ -3,17 +3,28 @@ resolver = "2"
 members = [
     "crates/pixelflow-core",
     "crates/pixelflow-processing",
+    "crates/pixelflow-capture",
+    "crates/pixelflow-wayland",
+    "crates/pixelflow-present",
     "crates/pixelflow-cli",
 ]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.85"
-license = "UNDECIDED"
+license = "Apache-2.0"
 authors = ["Bonzupii"]
 
 [workspace.dependencies]
 pixelflow-core = { path = "crates/pixelflow-core" }
 pixelflow-processing = { path = "crates/pixelflow-processing" }
+pixelflow-capture = { path = "crates/pixelflow-capture" }
+pixelflow-wayland = { path = "crates/pixelflow-wayland" }
+pixelflow-present = { path = "crates/pixelflow-present" }
 clap = { version = "4", features = ["derive"] }
 png = "0.17"
+ashpd = "0.14"
+pipewire = "0.8"
+tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+wgpu = "30"
+winit = "0.30"
