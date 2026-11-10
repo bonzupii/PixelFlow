@@ -6,6 +6,7 @@
 //! presentation, or files.
 
 pub mod algorithms;
+pub mod region_analysis;
 
 pub use algorithms::contour::{Contour, LimitedContour};
 pub use algorithms::nearest::Nearest;
