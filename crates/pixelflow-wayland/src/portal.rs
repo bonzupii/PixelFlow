@@ -65,6 +65,26 @@ struct Opened {
     size: Option<(u32, u32)>,
 }
 
+/// Format an ashpd error with the underlying D-Bus error name and
+/// message. `ashpd::Error::Portal` displays through zbus's `DBusError`
+/// derive as `{name}: {description}`, and for the `ZBus` catch-all
+/// the description is the generic "FDO error": the real D-Bus error
+/// name and message inside the `fdo::Error` are lost. Formatting the
+/// inner `zbus::Error` directly prints the `fdo::Error` display,
+/// which is the real name and message.
+fn format_ashpd_error(error: &ashpd::Error) -> String {
+    match error {
+        ashpd::Error::Portal(ashpd::PortalError::ZBus(inner)) => inner.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Wrap an ashpd error as a portal error, naming the call that
+/// failed so the message says where the session setup broke.
+fn portal_error(context: &str, error: ashpd::Error) -> WaylandError {
+    WaylandError::Portal(format!("{context}: {}", format_ashpd_error(&error)))
+}
+
 impl PortalSession {
     /// Create a session, request the source kind, and start the
     /// capture. Blocks until the user answers the compositor dialog
@@ -80,7 +100,7 @@ impl PortalSession {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| WaylandError::Portal(format!("build portal runtime: {e}")))?;
         let opened = runtime.block_on(async { Self::open_async(source).await })?;
         Ok(PortalSession {
             runtime,
@@ -102,11 +122,11 @@ impl PortalSession {
     async fn open_async(source: SourceKind) -> Result<Opened, WaylandError> {
         let proxy = Screencast::new()
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("create portal proxy", e))?;
         let available = proxy
             .available_source_types()
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("read available source types", e))?;
         let want = portal_source(source);
         if !available.contains(want) {
             return Err(WaylandError::SourceUnavailable {
@@ -117,7 +137,7 @@ impl PortalSession {
         let session = proxy
             .create_session(CreateSessionOptions::default())
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("create session", e))?;
         let options = SelectSourcesOptions::default()
             .set_cursor_mode(CursorMode::EMBEDDED)
             .set_sources(want)
@@ -126,18 +146,18 @@ impl PortalSession {
         proxy
             .select_sources(&session, options)
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("select sources", e))?;
         let streams = proxy
             .start(&session, None, StartCastOptions::default())
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?
+            .map_err(|e| portal_error("start session", e))?
             .response()
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("read start response", e))?;
         let stream = streams.streams().first().ok_or(WaylandError::NoStream)?;
         let fd = proxy
             .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
             .await
-            .map_err(|e| WaylandError::Portal(e.to_string()))?;
+            .map_err(|e| portal_error("open pipewire remote", e))?;
         let size = stream.size().and_then(|(w, h)| {
             let w = u32::try_from(w).ok()?;
             let h = u32::try_from(h).ok()?;
@@ -162,7 +182,59 @@ impl PortalSession {
             self.session
                 .close()
                 .await
-                .map_err(|e| WaylandError::Portal(e.to_string()))
+                .map_err(|e| portal_error("close session", e))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portal_zbus_error_keeps_dbus_name_and_message() {
+        let fdo =
+            ashpd::zbus::fdo::Error::ServiceUnknown("the portal service is missing".to_string());
+        let error = ashpd::Error::Portal(ashpd::PortalError::ZBus(ashpd::zbus::Error::FDO(
+            Box::new(fdo),
+        )));
+        let formatted = format_ashpd_error(&error);
+        assert!(
+            formatted.contains("org.freedesktop.DBus.Error.ServiceUnknown"),
+            "formatted: {formatted}"
+        );
+        assert!(
+            formatted.contains("the portal service is missing"),
+            "formatted: {formatted}"
+        );
+        assert!(
+            !formatted.contains("FDO error"),
+            "the generic description must not replace the real error: {formatted}"
+        );
+    }
+
+    #[test]
+    fn portal_failed_error_keeps_its_message() {
+        let error = ashpd::Error::Portal(ashpd::PortalError::Failed("backend refused".to_string()));
+        let formatted = format_ashpd_error(&error);
+        assert!(
+            formatted.contains("org.freedesktop.portal.Error.Failed"),
+            "formatted: {formatted}"
+        );
+        assert!(
+            formatted.contains("backend refused"),
+            "formatted: {formatted}"
+        );
+    }
+
+    #[test]
+    fn portal_error_names_the_call() {
+        let error =
+            ashpd::Error::Portal(ashpd::PortalError::NotFound("no such session".to_string()));
+        let err = portal_error("start session", error);
+        assert!(matches!(err, WaylandError::Portal(_)));
+        let text = err.to_string();
+        assert!(text.contains("start session"), "text: {text}");
+        assert!(text.contains("NotFound"), "text: {text}");
     }
 }
