@@ -81,8 +81,8 @@ fn format_ashpd_error(error: &ashpd::Error) -> String {
 
 /// Wrap an ashpd error as a portal error, naming the call that
 /// failed so the message says where the session setup broke.
-fn portal_error(context: &str, error: ashpd::Error) -> WaylandError {
-    WaylandError::Portal(format!("{context}: {}", format_ashpd_error(&error)))
+fn portal_error(context: &str, error: &ashpd::Error) -> WaylandError {
+    WaylandError::Portal(format!("{context}: {}", format_ashpd_error(error)))
 }
 
 impl PortalSession {
@@ -122,11 +122,11 @@ impl PortalSession {
     async fn open_async(source: SourceKind) -> Result<Opened, WaylandError> {
         let proxy = Screencast::new()
             .await
-            .map_err(|e| portal_error("create portal proxy", e))?;
+            .map_err(|e| portal_error("create portal proxy", &e))?;
         let available = proxy
             .available_source_types()
             .await
-            .map_err(|e| portal_error("read available source types", e))?;
+            .map_err(|e| portal_error("read available source types", &e))?;
         let want = portal_source(source);
         if !available.contains(want) {
             return Err(WaylandError::SourceUnavailable {
@@ -137,7 +137,7 @@ impl PortalSession {
         let session = proxy
             .create_session(CreateSessionOptions::default())
             .await
-            .map_err(|e| portal_error("create session", e))?;
+            .map_err(|e| portal_error("create session", &e))?;
         let options = SelectSourcesOptions::default()
             .set_cursor_mode(CursorMode::EMBEDDED)
             .set_sources(want)
@@ -146,18 +146,18 @@ impl PortalSession {
         proxy
             .select_sources(&session, options)
             .await
-            .map_err(|e| portal_error("select sources", e))?;
+            .map_err(|e| portal_error("select sources", &e))?;
         let streams = proxy
             .start(&session, None, StartCastOptions::default())
             .await
-            .map_err(|e| portal_error("start session", e))?
+            .map_err(|e| portal_error("start session", &e))?
             .response()
-            .map_err(|e| portal_error("read start response", e))?;
+            .map_err(|e| portal_error("read start response", &e))?;
         let stream = streams.streams().first().ok_or(WaylandError::NoStream)?;
         let fd = proxy
             .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
             .await
-            .map_err(|e| portal_error("open pipewire remote", e))?;
+            .map_err(|e| portal_error("open pipewire remote", &e))?;
         let size = stream.size().and_then(|(w, h)| {
             let w = u32::try_from(w).ok()?;
             let h = u32::try_from(h).ok()?;
@@ -182,7 +182,7 @@ impl PortalSession {
             self.session
                 .close()
                 .await
-                .map_err(|e| portal_error("close session", e))
+                .map_err(|e| portal_error("close session", &e))
         })
     }
 }
@@ -231,7 +231,7 @@ mod tests {
     fn portal_error_names_the_call() {
         let error =
             ashpd::Error::Portal(ashpd::PortalError::NotFound("no such session".to_string()));
-        let err = portal_error("start session", error);
+        let err = portal_error("start session", &error);
         assert!(matches!(err, WaylandError::Portal(_)));
         let text = err.to_string();
         assert!(text.contains("start session"), "text: {text}");
