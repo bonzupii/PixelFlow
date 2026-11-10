@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `d2e057e`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `46ad355`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -372,8 +372,13 @@ Contour product algorithm; do not confuse the two.
   description with no "algorithm 20"). The `contour.rs` module
   header was scrubbed too. Internal fixture files (`*_20_*`) and
   test identifiers were not renamed.
-- `docs/architecture.md` says Frame's fields are "public" — stale since
-  encapsulation; unfixed.
+- `docs/architecture.md` said Frame's fields are "public" — stale since
+  encapsulation; fixed in the docs cleanup (`b92eb91` on branch
+  `docs/readme-cleanup`, unmerged): fields are private with accessors.
+  The same cleanup corrected the CLI section (`run` takes
+  `--algorithm`; five commands), the test counts (217), the
+  presentation transport (replaceable slot, not a channel), and the
+  stale GPU/backends wording in `docs/algorithm-integration.md`.
 - `cargo clippy -p pixelflow-wayland --all-targets` exits 0
   (2026-11-10, after `ffff504` cleared the 10 `mock_portal.rs`
   errors structurally: `MockFaults` grouping, sync zbus methods,
@@ -383,8 +388,14 @@ Contour product algorithm; do not confuse the two.
   (2026-11-10); full suite 194 passed / 0 failed at that HEAD.
 - Per-stage Contour timing is unmeasured (the bench has no per-stage
   support); allocation profiling with actual tools is still outstanding.
-- Live `--help` execution has not been run on this VM since the dev
-  libraries were restored.
+- Live `--help` execution has been run on this VM since the dev
+  libraries were restored (docs cleanup, 2026-11-10, release binary
+  built in the worktree): `pixelflow 0.1.0`, five commands
+  (`upscale`, `run`, `backends`, `info`, `algorithms`), four
+  registered algorithms (`contour`, `nearest`, `bilinear`,
+  `nearest-gpu`, all 2x/4x), `run` takes `--algorithm` (default
+  `contour`). The README was rewritten against those outputs
+  (`d7a7107`).
 
 ## 8. Test and quality gates
 
@@ -430,6 +441,12 @@ Contour product algorithm; do not confuse the two.
   as well as after the change: it pins the path and localizes the
   live stall to Contour execution time; it is not a
   failing-before/passing-after pair.
+  Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
+  same gates, exit 0): 217 passed / 0 failed — same total as
+  `d2e057e` after the README/docs rewrite and the `run.rs`
+  simplification (duplicate shutdown discards collapsed into one
+  helper, unreachable stage-list branches removed); no behavior
+  change.
 - Environment note (2026-11-10): a VM restart mid-task wiped the
   `/usr` dev libraries (`libpipewire-0.3`, `libclang`, C headers).
   They were restored from Ubuntu Noble `.deb` files; `cargo` runs in
