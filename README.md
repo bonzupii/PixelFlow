@@ -48,19 +48,24 @@ are a typed error, never a silent conversion.
 ## Wayland capture
 
 `pixelflow run <application> [arguments]` launches the target
-unmodified, captures its window through the portal, processes
-each frame with contour, and presents the result in a separate
-fullscreen window. `--capture window|monitor` (window is the
-default), `--scale 2|4` (4 is the default), `--windowed` for a
-preview instead of fullscreen. Fullscreen is the default, and
-`f` toggles it while the presentation window runs. The
-compositor dialog is where the user picks the window. See
+unmodified, opens the portal session, processes each frame with
+contour, and presents the result in a separate fullscreen
+window. `--capture window|monitor` (window is the default),
+`--scale 2|4` (4 is the default), `--windowed` for a preview
+instead of fullscreen. Fullscreen is the default, and `f`
+toggles it while the presentation window runs. The compositor
+dialog is where the user picks the source, and PixelFlow does
+not verify that the picked source belongs to the launched
+process: the two-second wait before the dialog is startup
+grace for the target, not detection of its window. See
 `docs/wayland.md`.
 
 No input forwarding. ScreenCast carries no input, and this
 build does not forward keyboard, mouse, or controller input.
-RemoteDesktop and EIS/libei are future work; see
-`docs/wayland.md`.
+Until RemoteDesktop and EIS/libei exist, the product is
+read-only capture and presentation: the user interacts with
+the target window directly, and PixelFlow shows the processed
+copy. See `docs/wayland.md`.
 
 ## Usage
 
@@ -79,9 +84,9 @@ cargo build --release
 ## Verification
 
 `cargo build --release` is clean and `cargo test --release`
-passes: 48 tests, 0 failures (8 CLI, 3 core, 5 presentation, 1
-processing unit test, 3 regression, 12 Wayland, 16 synthetic).
-46 of the 48 run anywhere with no fixtures; the other 2 are
+passes: 64 tests, 0 failures (8 CLI, 13 core, 7 presentation, 2
+processing unit tests, 3 regression, 14 Wayland, 17 synthetic).
+62 of the 64 run anywhere with no fixtures; the other 2 are
 regression tests that skip without the copyrighted screenshots
 (the third regression test needs no fixtures). The regression
 tests compare each 4x output against the Python reference.
@@ -89,13 +94,14 @@ CI runs `cargo fmt --check`, the clippy gate, and `cargo build
 --release` plus `cargo test --release` on every push to main
 and every pull request (see `.github/workflows/ci.yml`).
 
-The clippy gate pins exactly 30 diagnostics in contour.rs (26
+The clippy gate allows at most 30 diagnostics in contour.rs (26
 `cast_possible_truncation`, 4 `cast_sign_loss`), all float
 narrowing at deliberate f32/f64 boundaries in the reference
 algorithm. Changing the edge follower's best-distance array to
 f64 moves the Mario regression from 34/6 to 34/7, so the
-narrowings stay. The gate fails on any new diagnostic and on
-any pinned diagnostic disappearing (see `ci/clippy-gate.sh`).
+narrowings stay. The 30 are a ceiling, not a floor: the gate
+fails on any new diagnostic, and a fix that removes a known
+diagnostic passes (see `ci/clippy-gate.sh`).
 
 The regression test compares each 4x output against the Python reference:
 

@@ -26,9 +26,12 @@ order.
 
 1. Launch the target unmodified. It inherits stdio and runs as a
    plain child process.
-2. Wait two seconds for the target's window to appear. The wait
-   covers application startup only. There is no window list to
-   poll, so the compositor dialog is where the window is picked.
+2. Wait two seconds for the target to start. The wait covers
+   application startup only. There is no window list to poll,
+   so the compositor dialog is where the source is picked, and
+   nothing verifies that the picked source belongs to the
+   launched process: the wait is startup grace, not detection
+   of the target's window.
 3. Open a portal ScreenCast session over D-Bus with ashpd.
    PixelFlow asks for the source types the compositor offers and
    requests window capture, or monitor capture when the caller
@@ -45,11 +48,14 @@ order.
    format parameter. Anything outside that list is a typed error,
    never a silent conversion.
 6. Read buffers, convert each to a frame, process it with
-   contour, and present it. A bounded channel holds one
-   processed frame between the processing thread and the
-   presentation window. When presentation falls behind, the oldest
-   unprocessed frame is dropped and the freshest is kept, so
-   latency never accumulates.
+   contour, and present it. A replaceable frame slot holds the
+   newest processed frame between the processing thread and
+   the presentation window, and the processing thread wakes
+   the presentation loop through an event-loop proxy each time
+   it publishes. When presentation falls behind, a newer frame
+   replaces the one still waiting in the slot, so the presented
+   frame is always the freshest; replaced frames are counted,
+   not hidden.
 7. Shut down. Either side ending sets the shared exit flag. The
    processing thread stops the stream, closes the portal session,
    and kills the child when it is still running. The presentation
@@ -79,7 +85,9 @@ buffer arriving anyway is a typed error the first time, not a
 silent fallback: mapping GPU buffers for CPU access is future
 work, and pretending a GPU buffer is a CPU buffer would corrupt
 frames. Dropped frames are counted, never hidden: the capture
-object exposes frames seen and frames dropped, and the processing
+object exposes frames seen and frames dropped, where dropped
+covers buffer-level drops at the stream plus frames replaced in
+the slot before the polling side took them, and the processing
 thread prints how many processed frames it dropped at shutdown.
 
 ## Input forwarding
@@ -88,9 +96,10 @@ ScreenCast carries no input. PixelFlow does not forward
 keyboard, mouse, or controller input yet, and it does not install
 global input interception. Input forwarding is future work
 through the XDG RemoteDesktop portal and EIS/libei, which need
-their own permission from the user. Until that lands, the target
-keeps its own input: the user interacts with the target window
-directly, and PixelFlow shows the processed copy.
+their own permission from the user. Until that lands, the
+product is read-only capture and presentation: the user
+interacts with the target window directly, and PixelFlow shows
+the processed copy.
 
 ## What was verified, and what was not
 

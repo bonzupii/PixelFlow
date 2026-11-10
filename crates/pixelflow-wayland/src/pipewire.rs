@@ -2,9 +2,12 @@
 //! portal remote and hands frames to the capture backend.
 //!
 //! The stream runs its own thread with a `PipeWire` main loop. Frames
-//! cross to the polling side on a bounded channel that holds one
-//! frame: when processing falls behind, the oldest unprocessed frame
-//! is dropped and the freshest is kept, so latency never accumulates.
+//! cross to the polling side through a replaceable frame slot: when
+//! processing falls behind, a newer frame replaces the one still
+//! waiting, so the polling side always gets the freshest frame and
+//! latency never accumulates. Replaced frames are counted in the
+//! slot, and buffer-level drops are counted in the shared state, so
+//! `frames_dropped` reports both.
 //!
 //! Format negotiation offers packed RGB formats only, and the stream
 //! is created with `MAP_BUFFERS` so the compositor maps buffers for CPU
@@ -25,7 +28,7 @@ use pipewire::spa::param::{
 use pipewire::spa::pod::{Pod, Value, serialize::PodSerializer};
 use pipewire::spa::utils::{Direction, Fraction, Rectangle};
 use pipewire::stream::{StreamBox, StreamFlags, StreamState};
-use pixelflow_core::Frame;
+use pixelflow_core::{Frame, FrameSlot};
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -39,7 +42,9 @@ struct Shared {
     error: Mutex<Option<WaylandError>>,
     /// Frames delivered to the polling side.
     frames: AtomicU64,
-    /// Frames dropped: out of buffers, or the channel already full.
+    /// Frames dropped at the stream: out of buffers, or a buffer
+    /// with no data. Frames replaced in the slot are counted in the
+    /// slot, not here.
     dropped: AtomicU64,
     /// Next capture sequence number, stamped on every frame the
     /// loop thread converts, delivered or not, so each captured
@@ -73,11 +78,11 @@ fn set_error(shared: &Shared, error: WaylandError) {
     }
 }
 
-/// Listener user data: the shared state, the frame channel, the stop
+/// Listener user data: the shared state, the frame slot, the stop
 /// flag the loop thread checks, and the negotiated format.
 struct StreamData {
     shared: Arc<Shared>,
-    sender: mpsc::SyncSender<Frame>,
+    slot: Arc<FrameSlot>,
     stop: Arc<AtomicBool>,
     format: Option<VideoFormat>,
     size: Option<(u32, u32)>,
@@ -122,11 +127,8 @@ fn handle_buffer(mut buffer: pw::buffer::Buffer, data: &mut StreamData) {
             let frame = frame
                 .with_timestamp(Instant::now())
                 .with_sequence(data.shared.sequence.fetch_add(1, Ordering::Relaxed));
-            if data.sender.try_send(frame).is_err() {
-                data.shared.dropped.fetch_add(1, Ordering::Relaxed);
-            } else {
-                data.shared.frames.fetch_add(1, Ordering::Relaxed);
-            }
+            data.slot.publish(frame);
+            data.shared.frames.fetch_add(1, Ordering::Relaxed);
         }
         Err(e) => set_error(&data.shared, e),
     }
@@ -196,7 +198,7 @@ struct LoopSetup {
     fd: OwnedFd,
     node_id: u32,
     shared: Arc<Shared>,
-    sender: mpsc::SyncSender<Frame>,
+    slot: Arc<FrameSlot>,
     ready: mpsc::Sender<Result<(), WaylandError>>,
 }
 
@@ -224,7 +226,7 @@ fn run_loop_inner(setup: LoopSetup) -> Result<(), WaylandError> {
     .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
     let data = StreamData {
         shared: setup.shared.clone(),
-        sender: setup.sender,
+        slot: setup.slot,
         stop: setup.stop.clone(),
         format: None,
         size: None,
@@ -315,9 +317,47 @@ fn run_loop(setup: LoopSetup) -> Result<(), WaylandError> {
     result
 }
 
+/// Wait for the loop thread to report readiness, cancelling it on
+/// every other outcome. This function owns the thread handle: on
+/// success it returns the handle to the caller, and on every other
+/// outcome it stops and joins the worker before returning an error,
+/// so no startup outcome leaves a worker running without an owner.
+/// The production timeout is ten seconds; tests pass a shorter one.
+///
+/// The join waits for the worker to finish whatever setup call it
+/// is in. `PipeWire` setup calls return (they fail fast on a bad fd
+/// and succeed fast on a good one), so the join is bounded by the
+/// setup work itself, not by the timeout.
+fn await_ready(
+    ready: &mpsc::Receiver<Result<(), WaylandError>>,
+    stop: &Arc<AtomicBool>,
+    thread: JoinHandle<Result<(), WaylandError>>,
+    timeout: Duration,
+) -> Result<JoinHandle<Result<(), WaylandError>>, WaylandError> {
+    let outcome = ready.recv_timeout(timeout);
+    let error = match outcome {
+        Ok(Ok(())) => return Ok(thread),
+        Ok(Err(e)) => e,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            WaylandError::PipeWire("timed out starting the capture stream".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            WaylandError::PipeWire("capture thread ended before starting".to_string())
+        }
+    };
+    stop.store(true, Ordering::Relaxed);
+    // Reap the worker: the join proves it terminated. Its
+    // result is already reported above, so only a panic gets
+    // a diagnostic.
+    if thread.join().is_err() {
+        eprintln!("pixelflow: capture thread panicked during startup");
+    }
+    Err(error)
+}
+
 /// A `PipeWire` video stream, running on its own thread.
 pub struct PipeWireCapture {
-    receiver: mpsc::Receiver<Frame>,
+    slot: Arc<FrameSlot>,
     shared: Arc<Shared>,
     stop: Option<Arc<AtomicBool>>,
     thread: Option<JoinHandle<Result<(), WaylandError>>>,
@@ -335,7 +375,7 @@ impl PipeWireCapture {
     /// not report readiness within ten seconds.
     pub fn start(fd: OwnedFd, node_id: u32) -> Result<PipeWireCapture, WaylandError> {
         let stop = Arc::new(AtomicBool::new(false));
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(1);
+        let slot = Arc::new(FrameSlot::new());
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), WaylandError>>();
         let shared = Arc::new(Shared::new());
         let setup = LoopSetup {
@@ -343,25 +383,17 @@ impl PipeWireCapture {
             fd,
             node_id,
             shared: shared.clone(),
-            sender: frame_tx,
+            slot: slot.clone(),
             ready: ready_tx,
         };
         let thread = std::thread::spawn(move || run_loop(setup));
-        match ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(())) => Ok(PipeWireCapture {
-                receiver: frame_rx,
-                shared,
-                stop: Some(stop),
-                thread: Some(thread),
-            }),
-            Ok(Err(e)) => Err(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(WaylandError::PipeWire(
-                "timed out starting the capture stream".to_string(),
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(WaylandError::PipeWire(
-                "capture thread ended before starting".to_string(),
-            )),
-        }
+        let thread = await_ready(&ready_rx, &stop, thread, Duration::from_secs(10))?;
+        Ok(PipeWireCapture {
+            slot,
+            shared,
+            stop: Some(stop),
+            thread: Some(thread),
+        })
     }
 
     /// The recorded stream error, if any. A poisoned lock yields its
@@ -378,7 +410,9 @@ impl PipeWireCapture {
     /// Take the next frame, waiting briefly for one to arrive.
     /// `Ok(None)` means no frame arrived in that wait, not end of
     /// stream; the stream error, when one is recorded, is reported
-    /// instead of a frame.
+    /// instead of a frame. When the loop thread has ended without
+    /// recording an error, the stream is over and this returns
+    /// `Disconnected`.
     ///
     /// # Errors
     ///
@@ -388,16 +422,16 @@ impl PipeWireCapture {
         if let Some(e) = self.check_error() {
             return Err(e);
         }
-        match self.receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => Ok(Some(frame)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(e) = self.check_error() {
-                    return Err(e);
-                }
-                Err(WaylandError::Disconnected)
-            }
+        if let Some(frame) = self.slot.take_wait(Duration::from_millis(100)) {
+            return Ok(Some(frame));
         }
+        if let Some(e) = self.check_error() {
+            return Err(e);
+        }
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            return Err(WaylandError::Disconnected);
+        }
+        Ok(None)
     }
 
     /// Frames delivered to the polling side so far.
@@ -406,10 +440,13 @@ impl PipeWireCapture {
         self.shared.frames.load(Ordering::Relaxed)
     }
 
-    /// Frames dropped so far: out of buffers, or the channel full.
+    /// Frames dropped so far: out of buffers at the stream, plus
+    /// frames replaced in the slot before the polling side took
+    /// them. A replaced frame was also counted in `frames_seen`:
+    /// it was produced, then dropped before consumption.
     #[must_use]
     pub fn frames_dropped(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed)
+        self.shared.dropped.load(Ordering::Relaxed) + self.slot.dropped()
     }
 
     /// Stop the stream and join the loop thread.
@@ -463,5 +500,56 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn await_ready_timeout_stops_and_joins_the_worker() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_flag = exited.clone();
+        let stop_flag = stop.clone();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), WaylandError>>();
+        // Hold the sender: nobody reports readiness, so the wait
+        // times out. A stalled worker that respects the stop flag,
+        // like the PipeWire loop does once it reaches its main loop.
+        let worker = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            exited_flag.store(true, Ordering::Relaxed);
+            Ok::<(), WaylandError>(())
+        });
+        let result = await_ready(&ready_rx, &stop, worker, Duration::from_millis(50));
+        assert!(
+            matches!(&result, Err(WaylandError::PipeWire(msg)) if msg.contains("timed out")),
+            "expected a timeout error, got {result:?}"
+        );
+        assert!(stop.load(Ordering::Relaxed), "the stop flag was set");
+        assert!(
+            exited.load(Ordering::Relaxed),
+            "the worker exited before await_ready returned"
+        );
+        drop(ready_tx);
+    }
+
+    #[test]
+    fn await_ready_reports_a_startup_error_and_reaps_the_worker() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), WaylandError>>();
+        let worker = std::thread::spawn(move || {
+            assert!(
+                ready_tx
+                    .send(Err(WaylandError::PipeWire("boom".to_string())))
+                    .is_ok(),
+                "the receiver is alive"
+            );
+            Ok::<(), WaylandError>(())
+        });
+        let result = await_ready(&ready_rx, &stop, worker, Duration::from_secs(5));
+        assert!(
+            matches!(&result, Err(WaylandError::PipeWire(msg)) if msg == "boom"),
+            "expected the startup error back, got {result:?}"
+        );
+        assert!(stop.load(Ordering::Relaxed), "the stop flag was set");
     }
 }

@@ -4,31 +4,36 @@
 //!
 //! The work splits across two threads. The processing thread owns the
 //! capture backend and the child process: it pulls frames, processes
-//! them, and sends the newest to the presentation window, dropping
-//! frames when presentation falls behind so latency never
-//! accumulates. The main thread runs the presentation window, because
-//! the windowing system requires the event loop there. Either side
-//! ending sets the shared exit flag, and the other side winds down:
-//! the processing thread stops capture and kills the child, and the
-//! presentation window closes.
+//! them, and publishes the newest to a replaceable frame slot. A
+//! newer frame replaces one still waiting in the slot, so the
+//! presentation window always draws the freshest frame and latency
+//! never accumulates. The processing thread wakes the presentation
+//! loop through an event-loop proxy each time it publishes, so the
+//! loop leaves `ControlFlow::Wait` as soon as a frame is ready. The
+//! main thread runs the presentation window, because the windowing
+//! system requires the event loop there. Either side ending sets the
+//! shared exit flag, and the other side winds down: the processing
+//! thread stops capture and kills the child, and the presentation
+//! window closes.
 //!
-//! The target is launched first, then PixelFlow waits briefly for its
-//! window to appear before opening the portal session. The compositor
-//! dialog is where the user picks the window, so the wait only covers
-//! application startup; there is no window list to poll.
+//! The target is launched first, then PixelFlow waits briefly for it
+//! to start before opening the portal session. The wait is startup
+//! grace, not detection: nothing verifies that the source the user
+//! picks in the compositor dialog belongs to the launched process,
+//! and there is no window list to poll.
 
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
-use pixelflow_core::Processor;
+use pixelflow_core::{FrameSlot, Processor};
+use pixelflow_present::{PresentLoop, PresentUserEvent};
 use pixelflow_processing::Contour;
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::Duration;
 
-/// How long to wait for the target's window to appear before opening
-/// the portal session.
+/// How long to wait for the target to start before opening the
+/// portal session. Startup grace, not detection.
 const WINDOW_GRACE: Duration = Duration::from_secs(2);
 
 /// Options for one `run` invocation.
@@ -78,21 +83,42 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         }
         return Err(format!("capture failed to start: {e}"));
     }
-    let (frame_tx, frame_rx) = mpsc::sync_channel(1);
+    let slot = Arc::new(FrameSlot::new());
     let exit = Arc::new(AtomicBool::new(false));
     let processing_exit = exit.clone();
     let scale = opts.scale;
     let program = opts.program.clone();
-    let worker = std::thread::spawn(move || -> Result<(), String> {
+    // Build the presentation loop before the worker starts, so the
+    // worker has the proxy it wakes the loop with. When no display
+    // server exists this fails here, before any frame is produced:
+    // stop capture and kill the child before reporting, the same
+    // shutdown the worker would have done.
+    let present = match PresentLoop::new(opts.windowed, slot.clone(), exit.clone()) {
+        Ok(present) => present,
+        Err(e) => {
+            match backend.shutdown() {
+                Ok(()) => {}
+                Err(_) => {}
+            }
+            match launcher.kill() {
+                Ok(()) => {}
+                Err(_) => {}
+            }
+            return Err(format!("presentation failed: {e}"));
+        }
+    };
+    let proxy = present.proxy();
+    let worker = std::thread::spawn(move || {
         run_processing(
             &mut backend,
             &mut launcher,
             scale,
-            frame_tx,
+            slot,
+            move || proxy.send_event(PresentUserEvent::FrameReady).is_ok(),
             processing_exit,
         )
     });
-    let present_result = pixelflow_present::run(opts.windowed, frame_rx, exit.clone());
+    let present_result = present.run();
     exit.store(true, Ordering::Relaxed);
     let worker_result = match worker.join() {
         Ok(result) => result,
@@ -109,25 +135,29 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     }
 }
 
-/// The processing thread: pull frames, process them, send the newest
-/// to presentation. Ends when the exit flag is set, the target exits,
-/// or capture fails.
+/// The processing thread: pull frames, process them, publish the
+/// newest to the presentation slot and wake the presentation loop.
+/// `wake` reports whether the loop is still alive: it sends the
+/// frame-ready user event through the loop's proxy, and returns
+/// false once the loop has closed. Ends when the exit flag is set,
+/// the target exits, the loop closes, or capture fails.
 fn run_processing(
     backend: &mut WaylandCapture,
     launcher: &mut Launcher,
     scale: u32,
-    frame_tx: mpsc::SyncSender<pixelflow_core::Frame>,
+    slot: Arc<FrameSlot>,
+    wake: impl Fn() -> bool,
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let processor = Contour;
-    let mut dropped: u64 = 0;
     let mut result: Result<(), String> = Ok(());
     while !exit.load(Ordering::Relaxed) {
         match backend.capture_frame() {
             Ok(Some(frame)) => match processor.process(&frame, scale) {
                 Ok(processed) => {
-                    if frame_tx.try_send(processed).is_err() {
-                        dropped += 1;
+                    slot.publish(processed);
+                    if !wake() {
+                        break;
                     }
                 }
                 Err(e) => {
@@ -167,6 +197,7 @@ fn run_processing(
             }
         }
     }
+    let dropped = slot.dropped();
     if dropped > 0 {
         eprintln!("pixelflow: dropped {dropped} processed frames (presentation behind)");
     }

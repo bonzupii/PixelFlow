@@ -147,16 +147,19 @@ the result back. Four commands:
 
 - `upscale <in.png> <out.png>`: `--scale 2|4` (default 4),
   `--algorithm contour|nearest` (default contour).
-- `run <program> [args]`: launches the target, captures it,
-  processes every frame with contour, presents it. `--capture
+- `run <program> [args]`: launches the target, captures the
+  source the user picks in the compositor dialog, processes
+  every frame with contour, presents it. `--capture
   window|monitor` (default window), `--scale 2|4` (default 4),
   `--windowed` for a preview instead of fullscreen (fullscreen
   is the default; `--fullscreen` and `--windowed` conflict).
   Arguments after `--` go to the target. `run` always uses
   contour; it takes no `--algorithm` flag. The launcher waits
-  2 seconds for the target's window to appear, then opens the
-  portal session; a target that exits before capture starts is
-  an error, and the child is killed on shutdown.
+  2 seconds for the target to start, then opens the portal
+  session; the wait is startup grace, not detection, and
+  PixelFlow never verifies that the picked source belongs to
+  the launched process. A target that exits before capture
+  starts is an error, and the child is killed on shutdown.
 - `backends`: lists the capture backend (Wayland), the
   presentation backend (wgpu), and the two algorithms with
   their scales.
@@ -193,19 +196,20 @@ the result back. Four commands:
   recorded in the README. Fixtures are local-only: the test
   skips when they are absent, so the suite stays green on a
   clean checkout.
-- Counts: 48 tests in total (8 CLI, 3 core, 5 presentation, 1
-  processing unit test, 3 regression, 12 Wayland, 16
-  synthetic). 46 run anywhere with no fixtures.
+- Counts: 64 tests in total (8 CLI, 13 core, 7 presentation, 2
+  processing unit tests, 3 regression, 14 Wayland, 17
+  synthetic). 62 run anywhere with no fixtures.
 - CI (`.github/workflows/ci.yml`, on every push to main and
   every pull request) runs three jobs: `cargo fmt --check`,
   the clippy gate (`ci/clippy-gate.sh`), and `cargo build
   --release` plus `cargo test --release` with no fixtures
   set, so the 2 fixture regression tests skip there by design.
-  The clippy gate pins exactly 30 diagnostics in contour.rs
+  The clippy gate allows at most 30 diagnostics in contour.rs
   (26 `cast_possible_truncation`, 4 `cast_sign_loss`): float
   narrowing at deliberate f32/f64 boundaries, proven
   load-bearing by experiment (changing the edge follower's
   best-distance array to f64 moved the Mario regression from
-  34/6 to 34/7). The gate fails on any new diagnostic and on
-  any pinned diagnostic disappearing. There is no `#[allow]`
+  34/6 to 34/7). The 30 are a ceiling, not a floor: the gate
+  fails on any new diagnostic, and a fix that removes a known
+  diagnostic passes. There is no `#[allow]`
   anywhere in the workspace.
