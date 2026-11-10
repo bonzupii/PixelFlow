@@ -3,6 +3,7 @@
 //! algorithm (00 in the upscaler experiments) and the reference every
 //! other algorithm is judged against.
 
+use pixelflow_core::graph::{ProcessorNode, SpatialDependency};
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
 
 /// Nearest-neighbour upscaling.
@@ -56,6 +57,16 @@ impl Processor for Nearest {
                 out.with_timestamp(frame.timestamp())
                     .with_sequence(frame.sequence())
             })
+    }
+}
+
+impl Nearest {
+    /// Wrap this algorithm as a graph node running at `scale`.
+    /// The node declares [`SpatialDependency::Local`]: each
+    /// output pixel copies exactly one input pixel.
+    #[must_use]
+    pub fn node(scale: u32) -> ProcessorNode<Self> {
+        ProcessorNode::new(Self, scale, SpatialDependency::Local)
     }
 }
 

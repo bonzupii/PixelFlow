@@ -229,13 +229,25 @@ would need a reason stated at the time; none has one.
 ## 8. What Stage II still owes after this step
 
 - The graph representation: nodes, edges, and execution
-  order. The `Processor` trait is still one frame in, one
-  frame out; the graph is what lets a frame take branches.
+  order. DONE in the graph step (`pixelflow-core/src/graph.rs`):
+  the `Node` trait, `ProcessorNode` wrapping `Processor`,
+  `GraphBuilder` validation (ports exist, every input fed
+  exactly once, formats agree, no cycles), and a whole-frame
+  executor that packs strided input for tight-only nodes and
+  drops intermediate frames when their last consumer runs.
+  The executor's execution path is the place dirty-region
+  tracking hooks in.
 - The node interface with dependency declarations
   (local / neighborhood / global / temporal), per the
-  section 9 spec. `stride_support()` is the first node
-  declaration; the dependency declaration is the second,
-  and it lands with the graph, not before it.
+  section 9 spec. DONE with the graph: `SpatialDependency`
+  and `TemporalDependency` on the node trait. Nearest declares
+  `Local`. Contour declares `Global`, not `Neighborhood`:
+  its labelset reads a 3x3 neighborhood, but the edge
+  follower's runs and gates span whole scanlines, so no small
+  radius bounds the input area one output pixel depends on.
+  The incremental step derives Contour's actual invalidation
+  requirements before it trusts anything tighter; until then
+  the honest declaration is global.
 - The configuration model: stable algorithm and filter
   identifiers, parameter validation, versioning, and
   save/load of processing graphs. The CLI's `--algorithm`

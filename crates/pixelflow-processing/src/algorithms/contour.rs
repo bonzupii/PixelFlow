@@ -28,6 +28,7 @@
 //! skips the edge follower (12 only); `CONTOUR_DEBUG_RUNS=1`
 //! prints each accepted run to stderr.
 
+use pixelflow_core::graph::{ProcessorNode, SpatialDependency};
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor, StrideSupport};
 
 // ---------------------------------------------------------------- images
@@ -1763,5 +1764,20 @@ impl Processor for Contour {
                 out.with_timestamp(frame.timestamp())
                     .with_sequence(frame.sequence())
             })
+    }
+}
+
+impl Contour {
+    /// Wrap this algorithm as a graph node running at `scale`.
+    /// The node declares [`SpatialDependency::Global`]: the
+    /// labelset reads a 3x3 neighborhood, but the edge
+    /// follower's runs and gates span whole scanlines, so no
+    /// small radius bounds the input area one output pixel
+    /// depends on. The incremental step derives the actual
+    /// invalidation requirements before it trusts anything
+    /// tighter; until then the honest declaration is global.
+    #[must_use]
+    pub fn node(scale: u32) -> ProcessorNode<Self> {
+        ProcessorNode::new(Self, scale, SpatialDependency::Global)
     }
 }
