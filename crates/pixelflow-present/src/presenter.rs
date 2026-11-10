@@ -453,7 +453,7 @@ impl Presenter {
             return false;
         };
         let rgba = rgba8_from_rgb8(&frame);
-        self.latest = Some((frame.width, frame.height, rgba));
+        self.latest = Some((frame.width(), frame.height(), rgba));
         true
     }
 

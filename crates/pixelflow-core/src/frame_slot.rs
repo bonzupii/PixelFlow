@@ -101,7 +101,7 @@ mod tests {
         slot.publish(frame_with_first_byte(1)?);
         slot.publish(frame_with_first_byte(2)?);
         let frame = slot.take().ok_or("expected a frame")?;
-        assert_eq!(frame.data[0], 2, "the newest frame wins");
+        assert_eq!(frame.data()[0], 2, "the newest frame wins");
         assert_eq!(slot.dropped(), 1, "the replaced frame is counted");
         assert!(slot.take().is_none(), "the slot is empty after taking");
         Ok(())
@@ -114,7 +114,7 @@ mod tests {
             slot.publish(frame_with_first_byte(value)?);
         }
         let frame = slot.take().ok_or("expected a frame")?;
-        assert_eq!(frame.data[0], 5, "the newest of five publishes wins");
+        assert_eq!(frame.data()[0], 5, "the newest of five publishes wins");
         assert_eq!(slot.dropped(), 4, "the four replaced frames are counted");
         Ok(())
     }
@@ -141,7 +141,7 @@ mod tests {
         let frame = slot
             .take_wait(Duration::from_secs(5))
             .ok_or("the published frame arrives")?;
-        assert_eq!(frame.data[0], 7);
+        assert_eq!(frame.data()[0], 7);
         Ok(())
     }
 }

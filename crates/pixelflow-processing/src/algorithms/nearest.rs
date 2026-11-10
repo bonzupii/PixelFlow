@@ -24,19 +24,23 @@ impl Processor for Nearest {
                 scale,
             });
         }
-        if frame.format != PixelFormat::Rgb8 {
+        if frame.format() != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
                 algorithm: "nearest",
-                format: frame.format.to_string(),
+                format: frame.format().to_string(),
             });
         }
         let s = scale as usize;
-        let (w, h) = (frame.width as usize, frame.height as usize);
-        let out_width = frame.width * scale;
-        let out_height = frame.height * scale;
+        let (w, h) = (frame.width() as usize, frame.height() as usize);
+        let out_width = frame.width().checked_mul(scale).ok_or_else(|| {
+            ProcessError::Internal("nearest output width exceeds u32 range".into())
+        })?;
+        let out_height = frame.height().checked_mul(scale).ok_or_else(|| {
+            ProcessError::Internal("nearest output height exceeds u32 range".into())
+        })?;
         let mut data = vec![0u8; w * s * h * s * 3];
-        for y in 0..frame.height {
-            for x in 0..frame.width {
+        for y in 0..frame.height() {
+            for x in 0..frame.width() {
                 let src = frame.pixel(x, y);
                 for dy in 0..s {
                     for dx in 0..s {
@@ -46,15 +50,12 @@ impl Processor for Nearest {
                 }
             }
         }
-        Ok(Frame {
-            width: out_width,
-            height: out_height,
-            format: PixelFormat::Rgb8,
-            stride: out_width as usize * 3,
-            timestamp: frame.timestamp,
-            sequence: frame.sequence,
-            data,
-        })
+        Frame::new(out_width, out_height, PixelFormat::Rgb8, data)
+            .map_err(|e| ProcessError::Internal(e.to_string()))
+            .map(|out| {
+                out.with_timestamp(frame.timestamp())
+                    .with_sequence(frame.sequence())
+            })
     }
 }
 
@@ -67,8 +68,8 @@ mod tests {
         let f = Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6])
             .map_err(|e| e.to_string())?;
         let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
-        assert_eq!(out.width, 4);
-        assert_eq!(out.height, 2);
+        assert_eq!(out.width(), 4);
+        assert_eq!(out.height(), 2);
         assert_eq!(out.pixel(0, 0), &[1, 2, 3]);
         assert_eq!(out.pixel(1, 0), &[1, 2, 3]);
         assert_eq!(out.pixel(2, 0), &[4, 5, 6]);
@@ -86,9 +87,9 @@ mod tests {
                 .with_sequence(7);
         let from_tight = Nearest.process(&tight, 2).map_err(|e| e.to_string())?;
         let from_strided = Nearest.process(&strided, 2).map_err(|e| e.to_string())?;
-        assert_eq!(from_strided.data, from_tight.data);
-        assert_eq!(from_strided.sequence, 7);
-        assert_eq!(from_strided.timestamp, strided.timestamp);
+        assert_eq!(from_strided.data(), from_tight.data());
+        assert_eq!(from_strided.sequence(), 7);
+        assert_eq!(from_strided.timestamp(), strided.timestamp());
         Ok(())
     }
 }

@@ -56,12 +56,12 @@ fn flat_frame(width: usize, height: usize, color: [u8; 3]) -> Result<Frame, Stri
 
 /// The distinct colors in a frame, sorted.
 fn distinct_colors(frame: &Frame) -> Vec<[u8; 3]> {
-    let mut colors: Vec<[u8; 3]> = (0..frame.width as usize * frame.height as usize)
+    let mut colors: Vec<[u8; 3]> = (0..frame.width() as usize * frame.height() as usize)
         .map(|index| {
             [
-                frame.data[index * 3],
-                frame.data[index * 3 + 1],
-                frame.data[index * 3 + 2],
+                frame.data()[index * 3],
+                frame.data()[index * 3 + 1],
+                frame.data()[index * 3 + 2],
             ]
         })
         .collect();
@@ -98,16 +98,17 @@ fn flat_predicted(value: u8) -> u8 {
 /// summed over channels. A checkerboard scores high, a smooth
 /// gradient scores low, mush scores near zero.
 fn horizontal_roughness(frame: &Frame) -> f64 {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
     let mut sum = 0f64;
     let mut count = 0f64;
     for row in 0..height {
         for col in 0..width - 1 {
             let base = (row * width + col) * 3;
             for channel in 0..3 {
-                sum +=
-                    f64::from(frame.data[base + channel].abs_diff(frame.data[base + 3 + channel]));
+                sum += f64::from(
+                    frame.data()[base + channel].abs_diff(frame.data()[base + 3 + channel]),
+                );
             }
             count += 1.0;
         }
@@ -120,13 +121,13 @@ fn horizontal_roughness(frame: &Frame) -> f64 {
 /// reports the frame height. This is the edge-crossing position
 /// of a two-color edge.
 fn edge_crossings(frame: &Frame) -> Vec<i32> {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
     let mut crossings = Vec::with_capacity(width);
     for col in 0..width {
         let mut crossing = i32::try_from(height).unwrap_or(i32::MAX);
         for row in 0..height {
-            if frame.data[(row * width + col) * 3] < 128 {
+            if frame.data()[(row * width + col) * 3] < 128 {
                 crossing = i32::try_from(row).unwrap_or(i32::MAX);
                 break;
             }
@@ -160,15 +161,15 @@ fn tiny_images_complete_at_both_scales() -> Result<(), String> {
             let scale_u = u32::try_from(scale).map_err(|err| err.to_string())?;
             let scale_us = usize::try_from(scale).map_err(|err| err.to_string())?;
             assert_eq!(
-                (out.width, out.height),
+                (out.width(), out.height()),
                 (
                     u32::try_from(width).map_err(|err| err.to_string())? * scale_u,
                     u32::try_from(height).map_err(|err| err.to_string())? * scale_u
                 ),
                 "{width}x{height} at {scale}x: dims"
             );
-            assert_eq!(out.format, PixelFormat::Rgb8);
-            assert_eq!(out.data.len(), width * scale_us * height * scale_us * 3);
+            assert_eq!(out.format(), PixelFormat::Rgb8);
+            assert_eq!(out.data().len(), width * scale_us * height * scale_us * 3);
         }
     }
     Ok(())
@@ -216,7 +217,7 @@ fn flat_single_pixel() -> Result<(), String> {
         let input = flat_frame(1, 1, color)?;
         for scale in [2, 4] {
             let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
-            assert_eq!((out.width, out.height), (scale, scale));
+            assert_eq!((out.width(), out.height()), (scale, scale));
             let distinct = distinct_colors(&out);
             assert_eq!(distinct.len(), 1);
             for channel in 0..3 {
@@ -260,7 +261,8 @@ fn axis_aligned_edges_match_nearest_exactly() -> Result<(), String> {
                 .process(input, scale)
                 .map_err(|err| err.to_string())?;
             assert_eq!(
-                from_contour.data, from_nearest.data,
+                from_contour.data(),
+                from_nearest.data(),
                 "straight edge at {scale}x: contour moved a pixel"
             );
             assert_eq!(distinct_colors(&from_contour).len(), 2);
@@ -332,15 +334,15 @@ fn diagonal_edge_antialiases() -> Result<(), String> {
         let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
         // Intermediate grays appear along the edge.
         assert!(distinct_colors(&out).len() > 2);
-        let has_intermediate = (0..out.width as usize * out.height as usize).any(|index| {
-            let value = out.data[index * 3];
+        let has_intermediate = (0..out.width() as usize * out.height() as usize).any(|index| {
+            let value = out.data()[index * 3];
             value > 0 && value < 255
         });
         assert!(has_intermediate, "at {scale}x: no antialiased pixel");
         // The corners sit in uniform neighbourhoods, so they stay
         // exactly the source colors.
         assert_eq!(out.pixel(0, 0), &[0, 0, 0]);
-        assert_eq!(out.pixel(out.width - 1, 0), &[255, 255, 255]);
+        assert_eq!(out.pixel(out.width() - 1, 0), &[255, 255, 255]);
     }
     Ok(())
 }
@@ -362,7 +364,10 @@ fn curve_edge_antialiases_with_exact_far_field() -> Result<(), String> {
         let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
         assert!(distinct_colors(&out).len() > 2);
         assert_eq!(out.pixel(0, 0), &[0, 0, 0]);
-        assert_eq!(out.pixel(out.width / 2, out.height / 2), &[255, 255, 255]);
+        assert_eq!(
+            out.pixel(out.width() / 2, out.height() / 2),
+            &[255, 255, 255]
+        );
     }
     Ok(())
 }
@@ -399,7 +404,7 @@ fn checkerboard_keeps_its_phase() -> Result<(), String> {
                         let index = ((cell_row * scale_u + dy) * 8 * scale_u
                             + (cell_col * scale_u + dx))
                             * 3;
-                        sum += u32::from(from_contour.data[index]);
+                        sum += u32::from(from_contour.data()[index]);
                         count += 1;
                     }
                 }
@@ -434,14 +439,14 @@ fn gradient_stays_smooth_without_banding() -> Result<(), String> {
     })?;
     for scale in [2, 4] {
         let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
-        let width = out.width as usize;
-        let height = out.height as usize;
+        let width = out.width() as usize;
+        let height = out.height() as usize;
         // Monotone in every row and channel: no reversals.
         for row in 0..height {
             for col in 0..width - 1 {
                 for channel in 0..3 {
-                    let here = out.data[(row * width + col) * 3 + channel];
-                    let next = out.data[(row * width + col + 1) * 3 + channel];
+                    let here = out.data()[(row * width + col) * 3 + channel];
+                    let next = out.data()[(row * width + col + 1) * 3 + channel];
                     assert!(next >= here, "at {scale}x row {row} col {col}: reversal");
                 }
             }
@@ -455,8 +460,8 @@ fn gradient_stays_smooth_without_banding() -> Result<(), String> {
         // already exclude.
         let mut max_step = 0u8;
         for col in 0..width - 1 {
-            let here = out.data[col * 3];
-            let next = out.data[(col + 1) * 3];
+            let here = out.data()[col * 3];
+            let next = out.data()[(col + 1) * 3];
             max_step = max_step.max(here.abs_diff(next));
         }
         assert!(max_step <= 32, "at {scale}x: max step {max_step}");
@@ -466,14 +471,14 @@ fn gradient_stays_smooth_without_banding() -> Result<(), String> {
         // The border pixels sit in locally flat neighbourhoods,
         // so they move by at most the flat-color shift (16).
         assert!(
-            out.data[0] <= 16,
+            out.data()[0] <= 16,
             "at {scale}x: first pixel {}",
-            out.data[0]
+            out.data()[0]
         );
         assert!(
-            out.data[(width - 1) * 3] >= 239,
+            out.data()[(width - 1) * 3] >= 239,
             "at {scale}x: last pixel {}",
-            out.data[(width - 1) * 3]
+            out.data()[(width - 1) * 3]
         );
     }
     Ok(())
@@ -494,7 +499,7 @@ fn palette_transitions_keep_their_colors() -> Result<(), String> {
         want.sort_unstable();
         assert_eq!(distinct_colors(&out), want, "at {scale}x: palette changed");
         assert!(
-            out.data.iter().all(|value| *value == 0 || *value == 255),
+            out.data().iter().all(|value| *value == 0 || *value == 255),
             "at {scale}x: a blended channel value appeared"
         );
     }
@@ -514,21 +519,21 @@ fn transparency_conversion_is_exact_and_processing_rejects_other_formats() -> Re
     let rgba = Frame::new(2, 2, PixelFormat::Rgba8, rgba_data).map_err(|err| err.to_string())?;
     let converted = rgba.to_rgb8();
     assert_eq!(
-        converted.data,
+        converted.data(),
         vec![9, 8, 7, 1, 2, 3, 4, 5, 6, 7, 7, 7],
         "to_rgb8 must keep RGB and drop alpha"
     );
-    let direct = Frame::new(2, 2, PixelFormat::Rgb8, converted.data.clone())
+    let direct = Frame::new(2, 2, PixelFormat::Rgb8, converted.data().to_vec())
         .map_err(|err| err.to_string())?;
     let from_converted = algo.process(&converted, 2).map_err(|err| err.to_string())?;
     let from_direct = algo.process(&direct, 2).map_err(|err| err.to_string())?;
-    assert_eq!(from_converted.data, from_direct.data);
+    assert_eq!(from_converted.data(), from_direct.data());
     assert!(matches!(
         algo.process(&rgba, 2),
         Err(ProcessError::UnsupportedFormat { .. })
     ));
     let grey = Frame::new(1, 1, PixelFormat::Gray8, vec![42]).map_err(|err| err.to_string())?;
-    assert_eq!(grey.to_rgb8().data, vec![42, 42, 42]);
+    assert_eq!(grey.to_rgb8().data(), vec![42, 42, 42]);
     assert!(matches!(
         algo.process(&grey, 2),
         Err(ProcessError::UnsupportedFormat { .. })
@@ -554,7 +559,7 @@ fn odd_dimensions_and_row_alignment() -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
             let scale_u = u32::try_from(scale).map_err(|err| err.to_string())?;
             assert_eq!(
-                (out.width, out.height),
+                (out.width(), out.height()),
                 (
                     u32::try_from(width).map_err(|err| err.to_string())? * scale_u,
                     u32::try_from(height).map_err(|err| err.to_string())? * scale_u
@@ -584,25 +589,25 @@ fn odd_dimensions_and_row_alignment() -> Result<(), String> {
             for block_row in 0..4 * scale_u {
                 let row = stripe * 4 * scale_u + block_row;
                 for col in 0..out_width {
-                    let got = from_nearest.data[(row * out_width + col) * 3];
+                    let got = from_nearest.data()[(row * out_width + col) * 3];
                     assert_eq!(got, want, "nearest stripe {stripe} row {row}");
-                    assert_eq!(from_nearest.data[(row * out_width + col) * 3 + 1], 0);
-                    assert_eq!(from_nearest.data[(row * out_width + col) * 3 + 2], 0);
+                    assert_eq!(from_nearest.data()[(row * out_width + col) * 3 + 1], 0);
+                    assert_eq!(from_nearest.data()[(row * out_width + col) * 3 + 2], 0);
                 }
             }
             for sample in [2 * scale_u, 2 * scale_u + 1] {
                 let row = stripe * 4 * scale_u + sample;
-                let got = from_contour.data[(row * out_width + 16 * scale_u) * 3];
+                let got = from_contour.data()[(row * out_width + 16 * scale_u) * 3];
                 assert!(
                     got.abs_diff(want) <= 17,
                     "contour stripe {stripe} at {scale}x: middle {got}, want {want}"
                 );
                 assert_eq!(
-                    from_contour.data[(row * out_width + 16 * scale_u) * 3 + 1],
+                    from_contour.data()[(row * out_width + 16 * scale_u) * 3 + 1],
                     0
                 );
                 assert_eq!(
-                    from_contour.data[(row * out_width + 16 * scale_u) * 3 + 2],
+                    from_contour.data()[(row * out_width + 16 * scale_u) * 3 + 2],
                     0
                 );
             }
@@ -623,14 +628,14 @@ fn large_image_completes_at_4x() -> Result<(), String> {
         ]
     })?;
     let out = algo.process(&input, 4).map_err(|err| err.to_string())?;
-    assert_eq!((out.width, out.height), (1024, 896));
+    assert_eq!((out.width(), out.height()), (1024, 896));
     let again = algo.process(&input, 4).map_err(|err| err.to_string())?;
-    assert_eq!(out.data, again.data, "large image not deterministic");
+    assert_eq!(out.data(), again.data(), "large image not deterministic");
     let medium = rgb_frame(64, 48, |col, row| {
         [byte_of(col * 3 + row * 7), byte_of(col + row * 5), 128]
     })?;
     let medium_out = algo.process(&medium, 4).map_err(|err| err.to_string())?;
-    assert_eq!((medium_out.width, medium_out.height), (256, 192));
+    assert_eq!((medium_out.width(), medium_out.height()), (256, 192));
     Ok(())
 }
 
@@ -663,9 +668,11 @@ fn repeated_processing_is_deterministic() -> Result<(), String> {
             let first = algo.process(input, scale).map_err(|err| err.to_string())?;
             let second = algo.process(input, scale).map_err(|err| err.to_string())?;
             assert_eq!(
-                first.data, second.data,
+                first.data(),
+                second.data(),
                 "{}x{} at {scale}x: second pass differs",
-                input.width, input.height
+                input.width(),
+                input.height()
             );
         }
     }
@@ -711,7 +718,7 @@ fn nearest_baseline_replicates_blocks_exactly() -> Result<(), String> {
     for scale in [2, 4] {
         let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
         let scale_u = usize::try_from(scale).map_err(|err| err.to_string())?;
-        assert_eq!((out.width, out.height), (3 * scale, 2 * scale));
+        assert_eq!((out.width(), out.height()), (3 * scale, 2 * scale));
         for out_row in 0..2 * scale_u {
             for out_col in 0..3 * scale_u {
                 let want = input.pixel(
@@ -754,8 +761,8 @@ fn contour_strided_input_matches_tight_input() -> Result<(), String> {
     let algo = Contour;
     let from_tight = algo.process(&tight, 2).map_err(|err| err.to_string())?;
     let from_strided = algo.process(&strided, 2).map_err(|err| err.to_string())?;
-    assert_eq!(from_strided.data, from_tight.data);
-    assert_eq!(from_strided.sequence, 9);
-    assert_eq!(from_strided.timestamp, strided.timestamp);
+    assert_eq!(from_strided.data(), from_tight.data());
+    assert_eq!(from_strided.sequence(), 9);
+    assert_eq!(from_strided.timestamp(), strided.timestamp());
     Ok(())
 }

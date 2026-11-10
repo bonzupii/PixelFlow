@@ -9,8 +9,8 @@ use pixelflow_core::Frame;
 /// strided frame uploads correctly; the output is tightly packed.
 #[must_use]
 pub fn rgba8_from_rgb8(frame: &Frame) -> Vec<u8> {
-    let mut out = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
-    for y in 0..frame.height {
+    let mut out = Vec::with_capacity(frame.width() as usize * frame.height() as usize * 4);
+    for y in 0..frame.height() {
         for px in frame.row(y).as_chunks::<3>().0 {
             out.push(px[0]);
             out.push(px[1]);

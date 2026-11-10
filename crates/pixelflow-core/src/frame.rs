@@ -12,28 +12,35 @@ use std::time::Instant;
 /// contiguous across rows only up to the stride: each row is
 /// `stride` bytes long, of which `width * bytes_per_pixel` hold
 /// pixels and the rest is padding.
+///
+/// The fields are private: the constructors check the buffer
+/// length and stride against the dimensions, and only the
+/// accessors below may read them, so no caller can invalidate
+/// those invariants after construction. The whole buffer is
+/// available through [`Frame::data`]; pixel bytes without
+/// padding come from [`Frame::row`] and [`Frame::pixel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     /// Image width in pixels.
-    pub width: u32,
+    width: u32,
     /// Image height in pixels.
-    pub height: u32,
+    height: u32,
     /// Pixel layout of `data`.
-    pub format: PixelFormat,
+    format: PixelFormat,
     /// Byte distance between the start of one row and the start
     /// of the next. Always `>= width * bytes_per_pixel`; equal
     /// to it for tightly packed frames.
-    pub stride: usize,
+    stride: usize,
     /// When the frame was captured, on the monotonic clock.
     /// Processing propagates the input frame's timestamp to its
     /// output, so pacing downstream still refers to the capture.
-    pub timestamp: Instant,
+    timestamp: Instant,
     /// Capture sequence number, assigned by the capture backend,
     /// monotonically increasing per captured frame. Processing
     /// propagates it to its output, like the timestamp.
-    pub sequence: u64,
+    sequence: u64,
     /// Row-major pixel data, `height * stride` bytes long.
-    pub data: Vec<u8>,
+    data: Vec<u8>,
 }
 
 /// A frame whose buffer length does not match its dimensions,
@@ -204,6 +211,52 @@ impl Frame {
         self.format.bytes_per_pixel()
     }
 
+    /// Image width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Image height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Pixel layout of the data buffer.
+    #[must_use]
+    pub fn format(&self) -> PixelFormat {
+        self.format
+    }
+
+    /// Byte distance between the start of one row and the start
+    /// of the next. Always `>= width * bytes_per_pixel`.
+    #[must_use]
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// When the frame was captured, on the monotonic clock.
+    #[must_use]
+    pub fn timestamp(&self) -> Instant {
+        self.timestamp
+    }
+
+    /// Capture sequence number, assigned by the capture backend.
+    #[must_use]
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The whole data buffer, `height * stride` bytes, padding
+    /// included. The single whole-buffer accessor: callers that
+    /// need pixel bytes without padding use [`Frame::row`] or
+    /// [`Frame::pixel`] instead.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// True when the rows carry no padding: `stride` equals
     /// `width * bytes_per_pixel`.
     #[must_use]
@@ -372,9 +425,9 @@ mod tests {
     #[test]
     fn new_is_tight_with_zero_sequence() -> Result<(), String> {
         let frame = Frame::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).map_err(|e| e.to_string())?;
-        assert_eq!(frame.stride, 6);
+        assert_eq!(frame.stride(), 6);
         assert!(frame.is_tight());
-        assert_eq!(frame.sequence, 0);
+        assert_eq!(frame.sequence(), 0);
         Ok(())
     }
 
@@ -395,8 +448,8 @@ mod tests {
         assert_eq!(frame.row(1), &[0, 0, 0, 10, 20, 30, 0, 0][..6]);
         frame.row_mut(0).copy_from_slice(&[1, 2, 3, 4, 5, 6]);
         assert_eq!(frame.pixel(1, 0), &[4, 5, 6]);
-        assert_eq!(frame.data[6], 0);
-        assert_eq!(frame.data[7], 0);
+        assert_eq!(frame.data()[6], 0);
+        assert_eq!(frame.data()[7], 0);
         Ok(())
     }
 
@@ -411,8 +464,8 @@ mod tests {
         let packed = strided.packed();
         assert!(matches!(packed, Cow::Owned(_)));
         assert!(packed.is_tight());
-        assert_eq!(packed.data, vec![1, 2, 3, 4, 5, 6]);
-        assert_eq!(packed.sequence, strided.sequence);
+        assert_eq!(packed.data(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(packed.sequence(), strided.sequence());
         Ok(())
     }
 
@@ -423,10 +476,10 @@ mod tests {
             .map_err(|e| e.to_string())?
             .with_timestamp(stamp)
             .with_sequence(41);
-        assert_eq!(frame.timestamp, stamp);
-        assert_eq!(frame.sequence, 41);
-        assert_eq!(frame.to_rgb8().sequence, 41);
-        assert_eq!(frame.to_rgb8().timestamp, stamp);
+        assert_eq!(frame.timestamp(), stamp);
+        assert_eq!(frame.sequence(), 41);
+        assert_eq!(frame.to_rgb8().sequence(), 41);
+        assert_eq!(frame.to_rgb8().timestamp(), stamp);
         Ok(())
     }
 
@@ -442,9 +495,9 @@ mod tests {
     fn to_rgb8_drops_alpha_and_expands_grey() -> Result<(), String> {
         let rgba =
             Frame::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]).map_err(|e| e.to_string())?;
-        assert_eq!(rgba.to_rgb8().data, vec![1, 2, 3]);
+        assert_eq!(rgba.to_rgb8().data(), vec![1, 2, 3]);
         let grey = Frame::new(1, 1, PixelFormat::Gray8, vec![7]).map_err(|e| e.to_string())?;
-        assert_eq!(grey.to_rgb8().data, vec![7, 7, 7]);
+        assert_eq!(grey.to_rgb8().data(), vec![7, 7, 7]);
         Ok(())
     }
 
@@ -458,7 +511,7 @@ mod tests {
             vec![1, 2, 3, 4, 9, 9, 9, 9, 5, 6, 7, 8, 9, 9, 9, 9],
         )
         .map_err(|e| e.to_string())?;
-        assert_eq!(rgba.to_rgb8().data, vec![1, 2, 3, 5, 6, 7]);
+        assert_eq!(rgba.to_rgb8().data(), vec![1, 2, 3, 5, 6, 7]);
         Ok(())
     }
 }

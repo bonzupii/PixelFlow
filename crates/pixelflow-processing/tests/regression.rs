@@ -98,14 +98,18 @@ fn load_png(path: &PathBuf) -> Result<Frame, String> {
 /// Max abs channel difference and the count of pixels differing by
 /// more than 1, between two frames of the same size.
 fn compare(a: &Frame, b: &Frame) -> (u8, usize) {
-    assert_eq!((a.width, a.height), (b.width, b.height), "size mismatch");
-    assert_eq!(a.format, b.format, "format mismatch");
+    assert_eq!(
+        (a.width(), a.height()),
+        (b.width(), b.height()),
+        "size mismatch"
+    );
+    assert_eq!(a.format(), b.format(), "format mismatch");
     let mut max = 0u8;
     let mut over_one = 0usize;
-    for i in 0..a.width as usize * a.height as usize {
+    for i in 0..a.width() as usize * a.height() as usize {
         let mut px_max = 0u8;
         for c in 0..3 {
-            let d = a.data[i * 3 + c].abs_diff(b.data[i * 3 + c]);
+            let d = a.data()[i * 3 + c].abs_diff(b.data()[i * 3 + c]);
             px_max = px_max.max(d);
         }
         max = max.max(px_max);
@@ -132,8 +136,8 @@ fn contour_matches_python_reference_at_4x() -> Result<(), String> {
         )?;
         let out = algo.process(&input, 4).map_err(|e| e.to_string())?;
         assert_eq!(
-            (out.width, out.height),
-            (expected.width, expected.height),
+            (out.width(), out.height()),
+            (expected.width(), expected.height()),
             "{name}: size"
         );
         let (max, over_one) = compare(&out, &expected);
@@ -161,7 +165,7 @@ fn contour_2x_dimensions() -> Result<(), String> {
     }
     let input = load_png(&dir.join("inputs").join("mario.png"))?;
     let out = Contour.process(&input, 2).map_err(|e| e.to_string())?;
-    assert_eq!((out.width, out.height), (512, 448));
+    assert_eq!((out.width(), out.height()), (512, 448));
     Ok(())
 }
 
@@ -170,7 +174,7 @@ fn nearest_sanity() -> Result<(), String> {
     let f =
         Frame::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).map_err(|e| e.to_string())?;
     let out = Nearest.process(&f, 2).map_err(|e| e.to_string())?;
-    assert_eq!((out.width, out.height), (4, 2));
+    assert_eq!((out.width(), out.height()), (4, 2));
     assert_eq!(out.pixel(0, 0), &[1, 2, 3]);
     assert_eq!(out.pixel(1, 0), &[1, 2, 3]);
     assert_eq!(out.pixel(2, 0), &[4, 5, 6]);

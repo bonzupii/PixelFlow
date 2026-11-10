@@ -125,9 +125,9 @@ mod tests {
     fn bgra_drops_alpha_and_orders_channels() -> Result<(), WaylandError> {
         let data = vec![30, 20, 10, 255, 60, 50, 40, 0];
         let f = packed_to_frame(VideoFormat::BGRA, 2, 1, 8, 0, &data)?;
-        assert_eq!(f.stride, 8);
+        assert_eq!(f.stride(), 8);
         assert_eq!(f.row(0), vec![10, 20, 30, 40, 50, 60]);
-        assert_eq!(f.data, vec![10, 20, 30, 40, 50, 60, 0, 0]);
+        assert_eq!(f.data(), vec![10, 20, 30, 40, 50, 60, 0, 0]);
         Ok(())
     }
 
@@ -135,7 +135,7 @@ mod tests {
     fn rgba_keeps_channel_order() -> Result<(), WaylandError> {
         let data = vec![10, 20, 30, 255, 40, 50, 60, 255];
         let f = packed_to_frame(VideoFormat::RGBA, 2, 1, 8, 0, &data)?;
-        assert_eq!(f.stride, 8);
+        assert_eq!(f.stride(), 8);
         assert_eq!(f.row(0), vec![10, 20, 30, 40, 50, 60]);
         Ok(())
     }
@@ -158,11 +158,11 @@ mod tests {
     fn three_byte_formats_convert() -> Result<(), WaylandError> {
         let data = vec![30, 20, 10, 60, 50, 40];
         assert_eq!(
-            packed_to_frame(VideoFormat::BGR, 2, 1, 6, 0, &data)?.data,
+            packed_to_frame(VideoFormat::BGR, 2, 1, 6, 0, &data)?.data(),
             vec![10, 20, 30, 40, 50, 60]
         );
         assert_eq!(
-            packed_to_frame(VideoFormat::RGB, 2, 1, 6, 0, &data)?.data,
+            packed_to_frame(VideoFormat::RGB, 2, 1, 6, 0, &data)?.data(),
             vec![30, 20, 10, 60, 50, 40]
         );
         Ok(())
@@ -176,11 +176,11 @@ mod tests {
         data.extend_from_slice(&[10, 20, 30, 255, 0, 0, 0, 0]);
         data.extend_from_slice(&[40, 50, 60, 255, 0, 0, 0, 0]);
         let f = packed_to_frame(VideoFormat::BGRA, 1, 2, 8, 2, &data)?;
-        assert_eq!(f.stride, 8);
+        assert_eq!(f.stride(), 8);
         assert_eq!(f.row(0), vec![30, 20, 10]);
         assert_eq!(f.row(1), vec![60, 50, 40]);
         assert_eq!(
-            f.data,
+            f.data(),
             vec![30, 20, 10, 0, 0, 0, 0, 0, 60, 50, 40, 0, 0, 0, 0, 0]
         );
         Ok(())

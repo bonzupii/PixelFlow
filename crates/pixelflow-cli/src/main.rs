@@ -86,9 +86,9 @@ fn run_upscale(input: &str, output: &str, scale: u32, algorithm_name: &str) -> R
     let frame = png_io::load_png(input)?;
     eprintln!(
         "input {}x{} {} scale {}x algorithm {}",
-        frame.width,
-        frame.height,
-        frame.format,
+        frame.width(),
+        frame.height(),
+        frame.format(),
         scale,
         proc.name()
     );
@@ -96,8 +96,8 @@ fn run_upscale(input: &str, output: &str, scale: u32, algorithm_name: &str) -> R
     let out = proc.process(&frame, scale).map_err(|e| e.to_string())?;
     eprintln!(
         "output {}x{} in {:.1}s",
-        out.width,
-        out.height,
+        out.width(),
+        out.height(),
         t0.elapsed().as_secs_f32()
     );
     png_io::save_png(output, &out)?;

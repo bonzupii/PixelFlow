@@ -1723,10 +1723,10 @@ impl Processor for Contour {
                 scale,
             });
         }
-        if frame.format != PixelFormat::Rgb8 {
+        if frame.format() != PixelFormat::Rgb8 {
             return Err(ProcessError::UnsupportedFormat {
                 algorithm: "contour",
-                format: frame.format.to_string(),
+                format: frame.format().to_string(),
             });
         }
         // Pack a strided input; a tight frame is borrowed, so the
@@ -1735,16 +1735,16 @@ impl Processor for Contour {
         let frame = &*frame;
         // Output dimensions are frame dims times the scale; fail
         // early with an honest error instead of truncating.
-        let out_width = frame.width.checked_mul(scale).ok_or_else(|| {
+        let out_width = frame.width().checked_mul(scale).ok_or_else(|| {
             ProcessError::Internal("contour output width exceeds u32 range".into())
         })?;
-        let out_height = frame.height.checked_mul(scale).ok_or_else(|| {
+        let out_height = frame.height().checked_mul(scale).ok_or_else(|| {
             ProcessError::Internal("contour output height exceeds u32 range".into())
         })?;
         let src = UImg {
-            w: frame.width as usize,
-            h: frame.height as usize,
-            d: frame.data.clone(),
+            w: frame.width() as usize,
+            h: frame.height() as usize,
+            d: frame.data().to_vec(),
         };
         let (out, stats) = clean_base_edge(&src, scale as usize);
         if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
@@ -1757,14 +1757,11 @@ impl Processor for Contour {
                 stats.touched_frac * 100.0
             );
         }
-        Ok(Frame {
-            width: out_width,
-            height: out_height,
-            format: PixelFormat::Rgb8,
-            stride: out_width as usize * 3,
-            timestamp: frame.timestamp,
-            sequence: frame.sequence,
-            data: to_u8_img(&out),
-        })
+        Frame::new(out_width, out_height, PixelFormat::Rgb8, to_u8_img(&out))
+            .map_err(|e| ProcessError::Internal(e.to_string()))
+            .map(|out| {
+                out.with_timestamp(frame.timestamp())
+                    .with_sequence(frame.sequence())
+            })
     }
 }

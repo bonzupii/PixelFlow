@@ -64,16 +64,16 @@ pub fn load_png(path: &str) -> Result<Frame, String> {
 /// time through the frame's row accessor, so a strided frame saves
 /// its pixels, not its padding.
 pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
-    if frame.format != PixelFormat::Rgb8 {
-        return Err(format!("cannot save {} frames as PNG", frame.format));
+    if frame.format() != PixelFormat::Rgb8 {
+        return Err(format!("cannot save {} frames as PNG", frame.format()));
     }
     let file = File::create(path).map_err(|e| format!("create {path}: {e}"))?;
     let w = BufWriter::new(file);
-    let mut enc = png::Encoder::new(w, frame.width, frame.height);
+    let mut enc = png::Encoder::new(w, frame.width(), frame.height());
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header().map_err(|e| format!("png header: {e}"))?;
-    for y in 0..frame.height {
+    for y in 0..frame.height() {
         writer
             .write_image_data(frame.row(y))
             .map_err(|e| format!("png write: {e}"))?;
