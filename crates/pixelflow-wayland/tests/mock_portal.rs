@@ -45,6 +45,9 @@ struct MockConfig {
     /// Emit the session `Closed` signal before answering `Start`,
     /// as a portal that closed the session mid-start would.
     emit_closed_after_start: bool,
+    /// Answer `Close` on the session with `UnknownMethod`, as a
+    /// portal that already destroyed the session object would.
+    session_gone_on_close: bool,
 }
 
 impl Default for MockConfig {
@@ -59,6 +62,7 @@ impl Default for MockConfig {
             serial_hyphenated: false,
             emit_closed_after_select: false,
             emit_closed_after_start: false,
+            session_gone_on_close: false,
         }
     }
 }
@@ -333,10 +337,14 @@ impl MockSession {
     }
 
     async fn close(&self) -> Result<(), fdo::Error> {
-        lock_state(&self.state)
-            .record
-            .closes
-            .push(self.path.clone());
+        let mut state = lock_state(&self.state);
+        state.record.closes.push(self.path.clone());
+        if state.config.session_gone_on_close {
+            return Err(fdo::Error::UnknownMethod(format!(
+                "Object does not exist at path \"{}\"",
+                self.path
+            )));
+        }
         Ok(())
     }
 }
@@ -528,7 +536,10 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
 
     // Selection cancelled: opening fails naming the selection
     // response, Start is never called, and the partial session is
-    // closed on the portal side.
+    // closed on the portal side. The portal already destroyed the
+    // session object when it cancelled, so that close answers
+    // UnknownMethod; the original failure is still the one
+    // reported, with the portal-side causes named.
     let closes_before = lock_state(&state).record.closes.len();
     let starts_before = lock_state(&state).record.starts;
     {
@@ -536,6 +547,7 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
         state.config.serial = Some(987_654_321);
         state.config.serial_hyphenated = false;
         state.config.select_response = 1;
+        state.config.session_gone_on_close = true;
     }
     let failed = open_with_timeout(SourceKind::Window).await?;
     assert!(failed.is_err(), "cancelled selection must fail the open");
@@ -548,6 +560,14 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
         assert!(
             text.contains("cancelled"),
             "the failure says the portal cancelled: {text}"
+        );
+        assert!(
+            text.contains("source picker dialog was dismissed"),
+            "the failure names the picker dismissal as a possible cause: {text}"
+        );
+        assert!(
+            text.contains("compositor backend cancelled the request"),
+            "the failure names the backend cancellation as a possible cause: {text}"
         );
     }
     assert_eq!(
@@ -566,6 +586,7 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
     {
         let mut state = lock_state(&state);
         state.config.select_response = 0;
+        state.config.session_gone_on_close = false;
         state.config.emit_closed_after_select = true;
     }
     let starts_before = lock_state(&state).record.starts;
