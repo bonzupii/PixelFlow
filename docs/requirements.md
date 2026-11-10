@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `27e6113`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `5c03b6f`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -450,6 +450,11 @@ Contour product algorithm; do not confuse the two.
   same total as the debug `afa6f46` run. Fixture-exercised evidence:
   regression 3 passed in 4.11 s (a skipped run finishes in 0.00 s);
   no skip lines. Full log: `goals/pixelflow/hidden_files/release-suite-27e6113.log`.
+  Caveat, recorded 2026-11-10: the run's raw output was not preserved
+  (the command piped through grep); that log file is a transcription
+  of the delivered run output, not a tee'd raw log. The tally is the
+  coordinator's run, not independently verified. Future suite runs
+  keep their raw output.
   This replaces the stale driver-run release 217 at `d2e057e`, which
   predates the region-routing commits and must not be carried forward.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
