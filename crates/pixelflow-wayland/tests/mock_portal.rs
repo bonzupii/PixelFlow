@@ -20,6 +20,24 @@ use zbus::{
     Connection, ObjectServer, OwnedFd, OwnedObjectPath, Variant, fdo, interface, message::Header,
 };
 
+/// Faults the mock portal injects into the session lifecycle,
+/// one scenario at a time. Three switches is the most a struct
+/// holds without becoming a grab bag; the serial-key spelling
+/// stays on [`MockConfig`] because it is a response variant, not
+/// a fault.
+#[derive(Debug, Clone, Default)]
+struct MockFaults {
+    /// Emit the session `Closed` signal before answering
+    /// `SelectSources`, as a portal that closed the session would.
+    emit_closed_after_select: bool,
+    /// Emit the session `Closed` signal before answering `Start`,
+    /// as a portal that closed the session mid-start would.
+    emit_closed_after_start: bool,
+    /// Answer `Close` on the session with `UnknownMethod`, as a
+    /// portal that already destroyed the session object would.
+    session_gone_on_close: bool,
+}
+
 /// The behavior the mock portal shows for the next scenario.
 #[derive(Debug, Clone)]
 struct MockConfig {
@@ -39,15 +57,8 @@ struct MockConfig {
     /// key a real portal wires, instead of the `pipewire_serial`
     /// key ashpd 0.14 reads.
     serial_hyphenated: bool,
-    /// Emit the session `Closed` signal before answering
-    /// `SelectSources`, as a portal that closed the session would.
-    emit_closed_after_select: bool,
-    /// Emit the session `Closed` signal before answering `Start`,
-    /// as a portal that closed the session mid-start would.
-    emit_closed_after_start: bool,
-    /// Answer `Close` on the session with `UnknownMethod`, as a
-    /// portal that already destroyed the session object would.
-    session_gone_on_close: bool,
+    /// Faults to inject into the session lifecycle.
+    faults: MockFaults,
 }
 
 impl Default for MockConfig {
@@ -60,9 +71,7 @@ impl Default for MockConfig {
             start_response: 0,
             serial: Some(987_654_321),
             serial_hyphenated: false,
-            emit_closed_after_select: false,
-            emit_closed_after_start: false,
-            session_gone_on_close: false,
+            faults: MockFaults::default(),
         }
     }
 }
@@ -76,12 +85,19 @@ struct SelectRecord {
     multiple: Option<bool>,
 }
 
+/// One `OpenPipeWireRemote` call, as the mock received it.
+#[derive(Debug, Default, Clone)]
+struct OpenRecord {
+    session: String,
+    option_keys: Vec<String>,
+}
+
 /// What the mock recorded, for assertions.
 #[derive(Debug, Default)]
 struct MockRecord {
     selects: Vec<SelectRecord>,
-    starts: usize,
-    opens: usize,
+    start_parents: Vec<String>,
+    opens: Vec<OpenRecord>,
     closes: Vec<String>,
     creates: usize,
 }
@@ -237,7 +253,7 @@ impl MockScreencast {
             });
             (
                 state.config.select_response,
-                state.config.emit_closed_after_select,
+                state.config.faults.emit_closed_after_select,
             )
         };
         if emit_closed {
@@ -261,7 +277,7 @@ impl MockScreencast {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
         session: OwnedObjectPath,
-        _parent_window: String,
+        parent_window: String,
         options: HashMap<String, Variant<'_>>,
     ) -> Result<OwnedObjectPath, fdo::Error> {
         let sender = sender_name(&header)?;
@@ -269,12 +285,12 @@ impl MockScreencast {
             .ok_or_else(|| fdo::Error::Failed("no handle token in Start".to_string()))?;
         let (code, serial, serial_hyphenated, emit_closed) = {
             let mut state = lock_state(&self.state);
-            state.record.starts += 1;
+            state.record.start_parents.push(parent_window);
             (
                 state.config.start_response,
                 state.config.serial,
                 state.config.serial_hyphenated,
-                state.config.emit_closed_after_start,
+                state.config.faults.emit_closed_after_start,
             )
         };
         if emit_closed {
@@ -311,12 +327,17 @@ impl MockScreencast {
         Ok(request)
     }
 
-    async fn open_pipe_wire_remote(
+    fn open_pipe_wire_remote(
         &self,
-        _session: OwnedObjectPath,
-        _options: HashMap<String, Variant<'_>>,
+        session: &OwnedObjectPath,
+        options: &HashMap<String, Variant<'_>>,
     ) -> Result<OwnedFd, fdo::Error> {
-        lock_state(&self.state).record.opens += 1;
+        let mut option_keys: Vec<String> = options.keys().cloned().collect();
+        option_keys.sort();
+        lock_state(&self.state).record.opens.push(OpenRecord {
+            session: session.to_string(),
+            option_keys,
+        });
         let file = std::fs::File::open("/dev/null")
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         Ok(OwnedFd::from(std::os::fd::OwnedFd::from(file)))
@@ -331,15 +352,10 @@ struct MockSession {
 
 #[interface(name = "org.freedesktop.portal.Session")]
 impl MockSession {
-    #[zbus(property, name = "version")]
-    fn version(&self) -> u32 {
-        1
-    }
-
-    async fn close(&self) -> Result<(), fdo::Error> {
+    fn close(&self) -> Result<(), fdo::Error> {
         let mut state = lock_state(&self.state);
         state.record.closes.push(self.path.clone());
-        if state.config.session_gone_on_close {
+        if state.config.faults.session_gone_on_close {
             return Err(fdo::Error::UnknownMethod(format!(
                 "Object does not exist at path \"{}\"",
                 self.path
@@ -385,6 +401,251 @@ async fn close_with_timeout(
     Ok(joined?)
 }
 
+/// Version 6, everything advertised: embedded is selected, the
+/// persist option is sent, the serial comes back.
+async fn scenario_version6_full(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(opened.node_id, 42, "node id from the mock stream");
+    assert_eq!(
+        opened.serial,
+        Some(987_654_321),
+        "serial from the mock stream"
+    );
+    assert_eq!(opened.size, Some((1920, 1080)), "size from the mock stream");
+    assert_eq!(
+        opened.portal_version, 6,
+        "portal version read from the mock"
+    );
+    {
+        let state = lock_state(state);
+        assert_eq!(state.record.selects.len(), 1, "one selection");
+        let select = &state.record.selects[0];
+        assert_eq!(select.cursor_mode, Some(2), "embedded was requested");
+        assert_eq!(select.persist_mode, Some(0), "do-not-persist was sent");
+        assert_eq!(select.types, Some(2), "window source was requested");
+        assert_eq!(select.multiple, Some(false), "single source was requested");
+        assert_eq!(state.record.start_parents.len(), 1, "one start");
+        assert_eq!(
+            state.record.start_parents[0], "",
+            "no parent window was passed"
+        );
+    }
+    close_with_timeout(opened).await??;
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        1,
+        "close reached the portal session"
+    );
+    {
+        let state = lock_state(state);
+        assert_eq!(state.record.opens.len(), 1, "one PipeWire remote open");
+        assert!(
+            state.record.opens[0].option_keys.is_empty(),
+            "no options were passed to open the remote"
+        );
+        assert!(
+            state.record.opens[0]
+                .session
+                .starts_with("/org/freedesktop/portal/desktop/session/"),
+            "the remote was opened for the mock session: {}",
+            state.record.opens[0].session
+        );
+    }
+    Ok(())
+}
+
+/// Cursor-mode advertisement: hidden alone, metadata alone, and
+/// nothing advertised.
+async fn scenario_cursor_modes(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Only hidden advertised: the request carries hidden, never an
+    // unadvertised mode.
+    lock_state(state).config.cursor_modes = 1;
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(
+        lock_state(state).record.selects[1].cursor_mode,
+        Some(1),
+        "hidden was requested when only hidden is advertised"
+    );
+    close_with_timeout(opened).await??;
+
+    // Only metadata advertised: metadata is selected over hidden.
+    lock_state(state).config.cursor_modes = 4;
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(
+        lock_state(state).record.selects[2].cursor_mode,
+        Some(4),
+        "metadata was requested when only metadata is advertised"
+    );
+    close_with_timeout(opened).await??;
+
+    // Nothing advertised: no cursor mode is sent at all, so the
+    // portal default applies.
+    lock_state(state).config.cursor_modes = 0;
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(
+        lock_state(state).record.selects[3].cursor_mode,
+        None,
+        "no cursor mode was sent when none is advertised"
+    );
+    close_with_timeout(opened).await??;
+    Ok(())
+}
+
+/// Old interface and serial handling: version 1 sends neither the
+/// cursor mode nor the persist option; a missing serial falls back
+/// to the node id; the hyphenated serial key ashpd 0.14 drops does
+/// the same.
+async fn scenario_version1_and_serial(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Version 1: the cursor mode and persist options stay off the
+    // wire, because both arrived in later interface versions.
+    {
+        let mut state = lock_state(state);
+        state.config.version = 1;
+        state.config.cursor_modes = 7;
+    }
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    {
+        let state = lock_state(state);
+        assert_eq!(
+            state.record.selects[4].cursor_mode, None,
+            "no cursor mode was sent to a version 1 portal"
+        );
+        assert_eq!(
+            state.record.selects[4].persist_mode, None,
+            "no persist mode was sent to a version 1 portal"
+        );
+    }
+    close_with_timeout(opened).await??;
+
+    // No serial in the Start response: the session still opens, and
+    // the caller falls back to the node id.
+    {
+        let mut state = lock_state(state);
+        state.config.version = 6;
+        state.config.cursor_modes = 7;
+        state.config.serial = None;
+    }
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(opened.serial, None, "no serial was reported");
+    assert_eq!(opened.node_id, 42, "node id still targets the stream");
+    close_with_timeout(opened).await??;
+
+    // A real portal wires the hyphenated serial key, which ashpd
+    // 0.14 does not parse: the serial stays None and the node id
+    // is the target, exactly as against a real portal today.
+    {
+        let mut state = lock_state(state);
+        state.config.serial = Some(987_654_321);
+        state.config.serial_hyphenated = true;
+    }
+    let opened = open_with_timeout(SourceKind::Window).await??;
+    assert_eq!(
+        opened.serial, None,
+        "the hyphenated serial key is not parsed by ashpd 0.14"
+    );
+    assert_eq!(opened.node_id, 42, "node id still targets the stream");
+    close_with_timeout(opened).await??;
+    Ok(())
+}
+
+/// Selection cancelled: opening fails naming the selection
+/// response, Start is never called, and the partial session is
+/// closed on the portal side. The portal already destroyed the
+/// session object when it cancelled, so that close answers
+/// `UnknownMethod`; the original failure is still the one
+/// reported, with the portal-side causes named.
+async fn scenario_cancelled_selection(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let closes_before = lock_state(state).record.closes.len();
+    let starts_before = lock_state(state).record.start_parents.len();
+    {
+        let mut state = lock_state(state);
+        state.config.serial = Some(987_654_321);
+        state.config.serial_hyphenated = false;
+        state.config.select_response = 1;
+        state.config.faults.session_gone_on_close = true;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "cancelled selection must fail the open");
+    if let Err(error) = failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("select sources response"),
+            "the failure names the selection response: {text}"
+        );
+        assert!(
+            text.contains("cancelled"),
+            "the failure says the portal cancelled: {text}"
+        );
+        assert!(
+            text.contains("source picker dialog was dismissed"),
+            "the failure names the picker dismissal as a possible cause: {text}"
+        );
+        assert!(
+            text.contains("compositor backend cancelled the request"),
+            "the failure names the backend cancellation as a possible cause: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(state).record.start_parents.len(),
+        starts_before,
+        "Start was never called after a refused selection"
+    );
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 1,
+        "the partial session was closed after the refused selection"
+    );
+    Ok(())
+}
+
+/// The portal closes the session after Start succeeds: opening
+/// fails naming the closure, and the `PipeWire` remote is never
+/// opened on the closed session.
+async fn scenario_closed_after_start(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let closes_before = lock_state(state).record.closes.len();
+    let opens_before = lock_state(state).record.opens.len();
+    {
+        let mut state = lock_state(state);
+        state.config.faults.emit_closed_after_select = false;
+        state.config.faults.emit_closed_after_start = true;
+        state.config.start_response = 0;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "a closed session must fail the open");
+    if let Err(error) = failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("closed by the portal"),
+            "the failure names the portal closure: {text}"
+        );
+        assert!(
+            text.contains("after start"),
+            "the failure names the closure happening after start: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(state).record.opens.len(),
+        opens_before,
+        "the PipeWire remote was never opened on the closed session"
+    );
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 1,
+        "the partial session was closed after the closure after start"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     let connection = match Connection::session().await {
@@ -421,175 +682,23 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
         )
         .await?;
 
-    // Version 6, everything advertised: embedded is selected, the
-    // persist option is sent, the serial comes back.
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(opened.node_id, 42, "node id from the mock stream");
-    assert_eq!(
-        opened.serial,
-        Some(987_654_321),
-        "serial from the mock stream"
-    );
-    assert_eq!(opened.size, Some((1920, 1080)), "size from the mock stream");
-    assert_eq!(
-        opened.portal_version, 6,
-        "portal version read from the mock"
-    );
-    {
-        let state = lock_state(&state);
-        assert_eq!(state.record.selects.len(), 1, "one selection");
-        let select = &state.record.selects[0];
-        assert_eq!(select.cursor_mode, Some(2), "embedded was requested");
-        assert_eq!(select.persist_mode, Some(0), "do-not-persist was sent");
-        assert_eq!(select.types, Some(2), "window source was requested");
-        assert_eq!(select.multiple, Some(false), "single source was requested");
-        assert_eq!(state.record.starts, 1, "one start");
-    }
-    close_with_timeout(opened).await??;
-    assert_eq!(
-        lock_state(&state).record.closes.len(),
-        1,
-        "close reached the portal session"
-    );
+    scenario_version6_full(&state).await?;
 
-    // Only hidden advertised: the request carries hidden, never an
-    // unadvertised mode.
-    lock_state(&state).config.cursor_modes = 1;
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(
-        lock_state(&state).record.selects[1].cursor_mode,
-        Some(1),
-        "hidden was requested when only hidden is advertised"
-    );
-    close_with_timeout(opened).await??;
+    scenario_cursor_modes(&state).await?;
 
-    // Only metadata advertised: metadata is selected over hidden.
-    lock_state(&state).config.cursor_modes = 4;
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(
-        lock_state(&state).record.selects[2].cursor_mode,
-        Some(4),
-        "metadata was requested when only metadata is advertised"
-    );
-    close_with_timeout(opened).await??;
+    scenario_version1_and_serial(&state).await?;
 
-    // Nothing advertised: no cursor mode is sent at all, so the
-    // portal default applies.
-    lock_state(&state).config.cursor_modes = 0;
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(
-        lock_state(&state).record.selects[3].cursor_mode,
-        None,
-        "no cursor mode was sent when none is advertised"
-    );
-    close_with_timeout(opened).await??;
-
-    // Version 1: the cursor mode and persist options stay off the
-    // wire, because both arrived in later interface versions.
-    {
-        let mut state = lock_state(&state);
-        state.config.version = 1;
-        state.config.cursor_modes = 7;
-    }
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    {
-        let state = lock_state(&state);
-        assert_eq!(
-            state.record.selects[4].cursor_mode, None,
-            "no cursor mode was sent to a version 1 portal"
-        );
-        assert_eq!(
-            state.record.selects[4].persist_mode, None,
-            "no persist mode was sent to a version 1 portal"
-        );
-    }
-    close_with_timeout(opened).await??;
-
-    // No serial in the Start response: the session still opens, and
-    // the caller falls back to the node id.
-    {
-        let mut state = lock_state(&state);
-        state.config.version = 6;
-        state.config.cursor_modes = 7;
-        state.config.serial = None;
-    }
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(opened.serial, None, "no serial was reported");
-    assert_eq!(opened.node_id, 42, "node id still targets the stream");
-    close_with_timeout(opened).await??;
-
-    // A real portal wires the hyphenated serial key, which ashpd
-    // 0.14 does not parse: the serial stays None and the node id
-    // is the target, exactly as against a real portal today.
-    {
-        let mut state = lock_state(&state);
-        state.config.serial = Some(987_654_321);
-        state.config.serial_hyphenated = true;
-    }
-    let opened = open_with_timeout(SourceKind::Window).await??;
-    assert_eq!(
-        opened.serial, None,
-        "the hyphenated serial key is not parsed by ashpd 0.14"
-    );
-    assert_eq!(opened.node_id, 42, "node id still targets the stream");
-    close_with_timeout(opened).await??;
-
-    // Selection cancelled: opening fails naming the selection
-    // response, Start is never called, and the partial session is
-    // closed on the portal side. The portal already destroyed the
-    // session object when it cancelled, so that close answers
-    // UnknownMethod; the original failure is still the one
-    // reported, with the portal-side causes named.
-    let closes_before = lock_state(&state).record.closes.len();
-    let starts_before = lock_state(&state).record.starts;
-    {
-        let mut state = lock_state(&state);
-        state.config.serial = Some(987_654_321);
-        state.config.serial_hyphenated = false;
-        state.config.select_response = 1;
-        state.config.session_gone_on_close = true;
-    }
-    let failed = open_with_timeout(SourceKind::Window).await?;
-    assert!(failed.is_err(), "cancelled selection must fail the open");
-    if let Err(error) = failed {
-        let text = error.to_string();
-        assert!(
-            text.contains("select sources response"),
-            "the failure names the selection response: {text}"
-        );
-        assert!(
-            text.contains("cancelled"),
-            "the failure says the portal cancelled: {text}"
-        );
-        assert!(
-            text.contains("source picker dialog was dismissed"),
-            "the failure names the picker dismissal as a possible cause: {text}"
-        );
-        assert!(
-            text.contains("compositor backend cancelled the request"),
-            "the failure names the backend cancellation as a possible cause: {text}"
-        );
-    }
-    assert_eq!(
-        lock_state(&state).record.starts,
-        starts_before,
-        "Start was never called after a refused selection"
-    );
-    assert_eq!(
-        lock_state(&state).record.closes.len(),
-        closes_before + 1,
-        "the partial session was closed after the refused selection"
-    );
+    scenario_cancelled_selection(&state).await?;
 
     // The portal closes the session after selection: opening fails
     // naming the closure, and Start is never called.
     {
         let mut state = lock_state(&state);
         state.config.select_response = 0;
-        state.config.session_gone_on_close = false;
-        state.config.emit_closed_after_select = true;
+        state.config.faults.session_gone_on_close = false;
+        state.config.faults.emit_closed_after_select = true;
     }
-    let starts_before = lock_state(&state).record.starts;
+    let starts_before = lock_state(&state).record.start_parents.len();
     let failed = open_with_timeout(SourceKind::Window).await?;
     assert!(failed.is_err(), "a closed session must fail the open");
     if let Err(error) = failed {
@@ -600,53 +709,20 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
         );
     }
     assert_eq!(
-        lock_state(&state).record.starts,
+        lock_state(&state).record.start_parents.len(),
         starts_before,
         "Start was never called after the portal closed the session"
     );
 
-    // The portal closes the session after Start succeeds: opening
-    // fails naming the closure, and the PipeWire remote is never
-    // opened on the closed session.
-    let closes_before = lock_state(&state).record.closes.len();
-    let opens_before = lock_state(&state).record.opens;
-    {
-        let mut state = lock_state(&state);
-        state.config.emit_closed_after_select = false;
-        state.config.emit_closed_after_start = true;
-        state.config.start_response = 0;
-    }
-    let failed = open_with_timeout(SourceKind::Window).await?;
-    assert!(failed.is_err(), "a closed session must fail the open");
-    if let Err(error) = failed {
-        let text = error.to_string();
-        assert!(
-            text.contains("closed by the portal"),
-            "the failure names the portal closure: {text}"
-        );
-        assert!(
-            text.contains("after start"),
-            "the failure names the closure happening after start: {text}"
-        );
-    }
-    assert_eq!(
-        lock_state(&state).record.opens,
-        opens_before,
-        "the PipeWire remote was never opened on the closed session"
-    );
-    assert_eq!(
-        lock_state(&state).record.closes.len(),
-        closes_before + 1,
-        "the partial session was closed after the closure after start"
-    );
+    scenario_closed_after_start(&state).await?;
 
     // Start cancelled: opening fails naming the start response, and
     // the partial session is closed.
     let closes_before = lock_state(&state).record.closes.len();
     {
         let mut state = lock_state(&state);
-        state.config.emit_closed_after_select = false;
-        state.config.emit_closed_after_start = false;
+        state.config.faults.emit_closed_after_select = false;
+        state.config.faults.emit_closed_after_start = false;
         state.config.start_response = 1;
     }
     let failed = open_with_timeout(SourceKind::Window).await?;
