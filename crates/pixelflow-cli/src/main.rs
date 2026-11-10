@@ -11,6 +11,7 @@ mod run;
 use clap::{Parser, Subcommand};
 use pixelflow_capture::SourceKind;
 use pixelflow_core::{AlgorithmConfig, AlgorithmDescriptor, Processor};
+use pixelflow_gpu::NearestGpuAlgorithm;
 use pixelflow_processing::{AlgorithmRegistry, ConfigValue};
 use std::process::ExitCode;
 
@@ -75,9 +76,15 @@ enum Command {
 
 /// The built-in algorithm registry: every algorithm the
 /// application can run, discovered from the registry rather
-/// than from a per-algorithm match.
+/// than from a per-algorithm match. The GPU nearest node
+/// registers here too: its descriptor needs no device, so
+/// listing and inspection work on a machine with no adapter;
+/// only building its graph touches hardware, and that fails
+/// loudly when no adapter exists.
 fn registry() -> AlgorithmRegistry {
-    AlgorithmRegistry::builtin()
+    let mut registry = AlgorithmRegistry::builtin();
+    registry.register(Box::new(NearestGpuAlgorithm));
+    registry
 }
 
 /// The `PIXELFLOW_MEMORY_BUDGET` value in bytes, when it is set
@@ -417,6 +424,20 @@ mod tests {
         let cli = Cli::try_parse_from(["pixelflow", "algorithms", "contour"])?;
         assert!(matches!(cli.command, Command::Algorithms { name: Some(_) }));
         Ok(())
+    }
+
+    #[test]
+    fn registry_lists_the_gpu_nearest_algorithm() {
+        let registry = registry();
+        assert!(registry.ids().contains(&"nearest-gpu"));
+        let descriptor = registry
+            .descriptor("nearest-gpu")
+            .expect("nearest-gpu is registered");
+        assert_eq!(
+            descriptor.backends,
+            vec![pixelflow_core::ExecutionBackend::Gpu]
+        );
+        assert_eq!(descriptor.supported_scales, vec![2, 4]);
     }
 
     #[test]

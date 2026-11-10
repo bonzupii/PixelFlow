@@ -1685,6 +1685,7 @@ dependencies = [
  "clap",
  "pixelflow-capture",
  "pixelflow-core",
+ "pixelflow-gpu",
  "pixelflow-present",
  "pixelflow-processing",
  "pixelflow-wayland",

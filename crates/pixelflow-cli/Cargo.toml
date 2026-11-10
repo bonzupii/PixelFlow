@@ -15,6 +15,7 @@ path = "src/bin/bench.rs"
 [dependencies]
 pixelflow-core = { workspace = true }
 pixelflow-processing = { workspace = true }
+pixelflow-gpu = { workspace = true }
 pixelflow-capture = { workspace = true }
 pixelflow-wayland = { workspace = true }
 pixelflow-present = { workspace = true }

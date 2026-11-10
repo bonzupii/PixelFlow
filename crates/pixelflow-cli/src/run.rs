@@ -27,11 +27,11 @@
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
 use pixelflow_core::{
-    AlgorithmConfig, DirtySet, Frame, FrameSlot, Graph, GraphBuilder, GraphError, Source, TileGrid,
-    TileRouting,
+    AlgorithmConfig, DirtySet, ExecutionBackend, Frame, FrameSlot, Graph, GraphBuilder, GraphError,
+    Source, TileGrid, TileRouting,
 };
+use pixelflow_gpu::{GpuCapability, GpuContext, backend_for, gpu_capability};
 use pixelflow_present::{PresentLoop, PresentUserEvent};
-use pixelflow_processing::AlgorithmRegistry;
 use pixelflow_processing::region_analysis::{RegionAnalyzer, RegionMap, Route, RoutingProfile};
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
@@ -103,6 +103,47 @@ fn initialize_capture(
     }
 }
 
+/// Resolve the requested algorithm id to the id the live
+/// graph builds, given whether a GPU adapter was found.
+/// Nearest is the only algorithm with a GPU implementation,
+/// so the GPU backend for it is the "nearest-gpu" registry
+/// id; every other algorithm keeps its own id. An explicit
+/// "nearest-gpu" request with no adapter is an error, not a
+/// silent CPU run: the user asked for the GPU node, and the
+/// CPU fallback is the "nearest" id, chosen explicitly.
+///
+/// # Errors
+///
+/// Returns a message when "nearest-gpu" was requested and no
+/// adapter exists.
+fn resolve_algorithm(requested: &str, adapter_present: bool) -> Result<&str, String> {
+    if requested == "nearest-gpu" && !adapter_present {
+        return Err(
+            "nearest-gpu requires a GPU adapter; no adapter was found on this machine — use nearest for CPU execution"
+                .to_string(),
+        );
+    }
+    if backend_for(requested, adapter_present) == ExecutionBackend::Gpu {
+        Ok("nearest-gpu")
+    } else {
+        Ok(requested)
+    }
+}
+
+/// Whether a GPU adapter exists on this machine, from the
+/// adapter probe: enumeration only, no device is created.
+/// Only called for an algorithm with a GPU implementation;
+/// CPU-only algorithms never probe.
+fn adapter_present() -> bool {
+    let adapters = GpuContext::probe_adapters();
+    if adapters.is_empty() {
+        eprintln!("pixelflow: no GPU adapter found on this machine");
+        false
+    } else {
+        true
+    }
+}
+
 /// Launch the target, capture its window, process frames, and present
 /// them until the window closes or the target exits.
 ///
@@ -113,7 +154,7 @@ fn initialize_capture(
 /// cannot open, capture fails, or the presentation window cannot
 /// start.
 pub fn run(opts: RunOptions) -> Result<(), String> {
-    let registry = AlgorithmRegistry::builtin();
+    let registry = crate::registry();
     let descriptor = registry
         .descriptor(&opts.algorithm)
         .map_err(|e| e.to_string())?;
@@ -123,6 +164,17 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
             opts.scale, opts.algorithm, descriptor.supported_scales
         ));
     }
+    let has_adapter = (gpu_capability(&opts.algorithm) == GpuCapability::Compute
+        || opts.algorithm == "nearest-gpu")
+        && adapter_present();
+    let algorithm = resolve_algorithm(&opts.algorithm, has_adapter)?.to_string();
+    let descriptor = registry.descriptor(&algorithm).map_err(|e| e.to_string())?;
+    let backend = descriptor
+        .backends
+        .first()
+        .copied()
+        .unwrap_or(ExecutionBackend::Cpu);
+    eprintln!("pixelflow: algorithm {algorithm} on {backend} backend");
     let mut launcher = Launcher::spawn(&opts.program, &opts.args)?;
     std::thread::sleep(WINDOW_GRACE);
     if launcher.exited() {
@@ -147,7 +199,10 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     let processing_exit = exit.clone();
     let scale = opts.scale;
     let program = opts.program.clone();
-    let algorithm = opts.algorithm.clone();
+    // `algorithm` is the effective id from the backend
+    // resolution above: the GPU node id when an adapter is
+    // present, the requested id otherwise. The worker builds
+    // its graph from this id.
     // Build the presentation loop before the worker starts, so the
     // worker has the proxy it wakes the loop with. When no display
     // server exists this fails here, before any frame is produced:
@@ -218,7 +273,11 @@ fn build_algorithm_graph(
     config: &AlgorithmConfig,
     scale: u32,
 ) -> Result<Graph, GraphError> {
-    let registry = AlgorithmRegistry::builtin();
+    // The full registry, including the GPU factory: a
+    // "nearest-gpu" graph builds its node on the GPU context
+    // the factory creates, and fails loudly when no adapter
+    // exists, instead of substituting the CPU node.
+    let registry = crate::registry();
     let descriptor = registry
         .descriptor(algorithm)
         .map_err(|error| GraphError::Internal(error.to_string()))?;
@@ -386,7 +445,7 @@ fn run_processing(
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut result: Result<(), String> = Ok(());
-    let registry = AlgorithmRegistry::builtin();
+    let registry = crate::registry();
     let config = crate::algorithm_config(&registry, algorithm);
     match build_algorithm_graph(algorithm, &config, scale) {
         Ok(mut graph) => {
@@ -669,6 +728,73 @@ mod tests {
             );
         }
         assert_eq!(backend.attempts, vec![SourceKind::Monitor]);
+    }
+
+    #[test]
+    fn gpu_selection_uses_the_gpu_node_with_an_adapter() {
+        assert_eq!(resolve_algorithm("nearest", true), Ok("nearest-gpu"));
+        assert_eq!(resolve_algorithm("nearest", false), Ok("nearest"));
+        assert_eq!(resolve_algorithm("contour", true), Ok("contour"));
+        assert_eq!(resolve_algorithm("bilinear", true), Ok("bilinear"));
+        assert_eq!(resolve_algorithm("nearest-gpu", true), Ok("nearest-gpu"));
+    }
+
+    #[test]
+    fn explicit_gpu_algorithm_without_an_adapter_is_an_error() {
+        let result = resolve_algorithm("nearest-gpu", false);
+        assert!(result.is_err(), "expected an adapter error");
+        assert!(
+            matches!(&result, Err(e) if e.contains("requires a GPU adapter") && e.contains("nearest")),
+            "the error names the missing adapter and the CPU fallback, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn nearest_cpu_graph_matches_direct_processor_output() -> Result<(), String> {
+        use pixelflow_processing::Nearest;
+        let mut data = Vec::with_capacity(4 * 4 * 3);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v: u8 = if x + y < 3 {
+                    20
+                } else if x + y < 5 {
+                    128
+                } else {
+                    240
+                };
+                data.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
+        let direct = Nearest.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graph = build_algorithm_graph("nearest", &AlgorithmConfig::new(), 2)
+            .map_err(|e| e.to_string())?;
+        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
+            .map_err(|e| e.to_string())?;
+        assert_eq!((processed.width(), processed.height()), (8, 8));
+        assert_eq!(processed.data(), direct.data());
+        Ok(())
+    }
+
+    #[test]
+    fn nearest_gpu_graph_build_fails_loudly_without_an_adapter() {
+        // The probe and the graph build enumerate the same
+        // adapters, so they agree: no adapter fails the
+        // build with the reason, and an adapter builds it.
+        if GpuContext::probe_adapters().is_empty() {
+            match build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2) {
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("no GPU adapter"),
+                        "the error names the missing adapter, got {error}"
+                    );
+                }
+                Ok(_) => panic!("expected a no-adapter error"),
+            }
+        } else {
+            let graph = build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2);
+            assert!(graph.is_ok(), "an adapter builds the GPU graph");
+        }
     }
 
     #[test]
