@@ -232,6 +232,33 @@ impl StreamTarget {
     }
 }
 
+/// Build the stream properties and resolve the connect target from
+/// the portal's serial or node id. Serial targeting goes through
+/// the target.object property and an unspecified connect id, so
+/// `PipeWire` resolves the serial itself; node-id targeting passes
+/// the id to connect directly.
+fn stream_properties(target: &StreamTarget) -> (pw::properties::PropertiesBox, Option<u32>) {
+    let mut properties = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Screen",
+    };
+    let target_id = match target {
+        StreamTarget::Serial(serial) => {
+            properties.insert(*pw::keys::TARGET_OBJECT, serial.to_string());
+            eprintln!("pixelflow: pipewire: connecting by stream serial {serial}");
+            None
+        }
+        StreamTarget::Node(node_id) => {
+            eprintln!(
+                "pixelflow: pipewire: connecting by node id {node_id} (portal gave no serial)"
+            );
+            Some(*node_id)
+        }
+    };
+    (properties, target_id)
+}
+
 /// Build the context, core, and stream on the portal fd, report
 /// readiness, then drive the main loop with bounded iterations until
 /// the stop flag is set. Iterations are bounded so the stop flag is
@@ -244,27 +271,7 @@ fn run_loop_inner(setup: LoopSetup) -> Result<(), WaylandError> {
     let core = context
         .connect_fd(setup.fd, None)
         .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
-    let mut properties = pw::properties::properties! {
-        *pw::keys::MEDIA_TYPE => "Video",
-        *pw::keys::MEDIA_CATEGORY => "Capture",
-        *pw::keys::MEDIA_ROLE => "Screen",
-    };
-    // Serial targeting goes through the target.object property and
-    // an unspecified connect id, so PipeWire resolves the serial
-    // itself; node-id targeting passes the id to connect directly.
-    let target_id = match setup.target {
-        StreamTarget::Serial(serial) => {
-            properties.insert(*pw::keys::TARGET_OBJECT, serial.to_string());
-            eprintln!("pixelflow: pipewire: connecting by stream serial {serial}");
-            None
-        }
-        StreamTarget::Node(node_id) => {
-            eprintln!(
-                "pixelflow: pipewire: connecting by node id {node_id} (portal gave no serial)"
-            );
-            Some(node_id)
-        }
-    };
+    let (properties, target_id) = stream_properties(&setup.target);
     let stream = StreamBox::new(&core, "pixelflow-capture", properties)
         .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
     let data = StreamData {
