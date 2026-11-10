@@ -60,9 +60,10 @@ pub fn load_png(path: &str) -> Result<Frame, String> {
     Frame::new(w, h, PixelFormat::Rgb8, data).map_err(|e| e.to_string())
 }
 
-/// Save an RGB8 frame as a PNG file. Rows are written one at a
-/// time through the frame's row accessor, so a strided frame saves
-/// its pixels, not its padding.
+/// Save an RGB8 frame as a PNG file. The rows are concatenated
+/// into one contiguous buffer first, so a strided frame saves its
+/// pixels, not its padding; `write_image_data` takes the whole
+/// image in one call and rejects a single row.
 pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
     if frame.format() != PixelFormat::Rgb8 {
         return Err(format!("cannot save {} frames as PNG", frame.format()));
@@ -73,10 +74,46 @@ pub fn save_png(path: &str, frame: &Frame) -> Result<(), String> {
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header().map_err(|e| format!("png header: {e}"))?;
+    let mut data = vec![0u8; frame.width() as usize * frame.height() as usize * 3];
     for y in 0..frame.height() {
-        writer
-            .write_image_data(frame.row(y))
-            .map_err(|e| format!("png write: {e}"))?;
+        let row = frame.row(y);
+        let start = y as usize * row.len();
+        data[start..start + row.len()].copy_from_slice(row);
     }
+    writer
+        .write_image_data(&data)
+        .map_err(|e| format!("png write: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_round_trips_a_strided_frame_without_its_padding() {
+        // 2x2, stride 8 bytes per row: 6 pixel bytes, 2 padding.
+        // The padding bytes are 0xEE; a save that copied them
+        // would come back as different pixels.
+        let mut data = vec![0u8; 2 * 8];
+        data[0..6].copy_from_slice(&[10, 20, 30, 40, 50, 60]);
+        data[8..14].copy_from_slice(&[70, 80, 90, 100, 110, 120]);
+        data[6] = 0xEE;
+        data[7] = 0xEE;
+        data[14] = 0xEE;
+        data[15] = 0xEE;
+        let frame =
+            Frame::new_with_stride(2, 2, PixelFormat::Rgb8, 8, data).expect("strided frame builds");
+        let path = std::env::temp_dir().join("pixelflow-png-strided-test.png");
+        save_png(path.to_str().expect("temp path is UTF-8"), &frame).expect("save writes the file");
+        let loaded =
+            load_png(path.to_str().expect("temp path is UTF-8")).expect("saved file loads");
+        assert_eq!(loaded.width(), 2);
+        assert_eq!(loaded.height(), 2);
+        assert_eq!(
+            loaded.data(),
+            &[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]
+        );
+        std::fs::remove_file(&path).expect("temp file removes");
+    }
 }
