@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `afa6f46`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `27e6113`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -444,6 +444,14 @@ Contour product algorithm; do not confuse the two.
   Baseline at `afa6f46` verified by the coordinator (debug, 2026-11-10,
   same gates, exit 0): 226 passed / 0 failed — the 217 from `d2e057e`
   plus 9 new region-routing tests (8 `region_analysis`, 1 CLI).
+  Baseline at `27e6113` verified by the coordinator (release, 2026-11-10,
+  `cargo test --release --workspace` under `dbus-run-session` with
+  `PIXELFLOW_FIXTURES_DIR` set, exit 0, 352 s): 226 passed / 0 failed —
+  same total as the debug `afa6f46` run. Fixture-exercised evidence:
+  regression 3 passed in 4.11 s (a skipped run finishes in 0.00 s);
+  no skip lines. Full log: `goals/pixelflow/hidden_files/release-suite-27e6113.log`.
+  This replaces the stale driver-run release 217 at `d2e057e`, which
+  predates the region-routing commits and must not be carried forward.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -586,7 +594,8 @@ In execution order (§11 of the owner directive):
 1. Baseline test suite — done at `4b1289a` (155 passed / 0 failed);
    re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
    (194 passed / 0 failed, fixtures exercised), at `d3c4b41` (199),
-   at `aea977c` (213), at `d2e057e` (217), at `afa6f46` (226).
+   at `aea977c` (213), at `d2e057e` (217), at `afa6f46` (226, debug),
+   at `27e6113` (226, release, fixtures exercised).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
