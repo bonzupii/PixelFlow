@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `5c03b6f`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `0ba9d38`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -455,6 +455,25 @@ Contour product algorithm; do not confuse the two.
   of the delivered run output, not a tee'd raw log. The tally is the
   coordinator's run, not independently verified. Future suite runs
   keep their raw output.
+  Correction, recorded 2026-11-10: the `27e6113` baseline is void as a
+  green-tree claim. CI failed the `cargo build --release` step on
+  `27e6113`, `5c03b6f`, and `a342755`: `RoutedGraphs::graph` and
+  `RoutedGraphs::node_for_tile` in `crates/pixelflow-cli/src/run.rs`
+  were called only from the test module, so non-test builds failed
+  with a dead-code error under the workspace warning denial, while
+  test builds used them and passed. The 226/0 test tally may describe
+  the test run, but a tree that does not build is not green.
+  Baseline at `0ba9d38` verified by the replacement coordinator
+  (release, 2026-11-10, `cargo build --release` exit 0,
+  `cargo test --release --workspace` under `dbus-run-session` with
+  `PIXELFLOW_FIXTURES_DIR` set, exit 0): 226 passed / 0 failed,
+  regression identity mario max 34 with exactly 6 pixels >1, all
+  others max 1 with 0 pixels >1. Full gate re-run independently by
+  the coordinator (build, suite, fmt, clippy gate), raw logs in
+  `goals/pixelflow/hidden_files/ci-verify-suite-release.log`,
+  `ci-verify-clippy.log`, `ci-verify-fmt.log`. The fix removed the
+  two dead methods and rewrote the three routed-frame tests through
+  the live paths; no routing behavior changed.
   This replaces the stale driver-run release 217 at `d2e057e`, which
   predates the region-routing commits and must not be carried forward.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
@@ -600,7 +619,9 @@ In execution order (§11 of the owner directive):
    re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
    (194 passed / 0 failed, fixtures exercised), at `d3c4b41` (199),
    at `aea977c` (213), at `d2e057e` (217), at `afa6f46` (226, debug),
-   at `27e6113` (226, release, fixtures exercised).
+   at `27e6113` (226, release, fixtures exercised — baseline void,
+   tree did not build; see §8), at `0ba9d38` (226, release, fixtures
+   exercised, gate verified independently).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
