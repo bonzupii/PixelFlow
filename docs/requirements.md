@@ -36,18 +36,18 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `c1c3a88`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `ffff504`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
-| `pixelflow-processing` | Algorithms `Contour`, `Nearest`; region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; algorithm framework implemented in the framework worktree, integration pending |
-| `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); device run unverified — no adapter on this VM; not yet wired into the live path or the algorithm registry |
+| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
+| `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); device run unverified — no adapter on this VM; not yet wired into the live path or the algorithm registry |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
 | `pixelflow-present` | wgpu presentation window, aspect-ratio-preserving layout, frame slot with latest-frame-wins, event-loop wake-up via event proxy | Implemented; no GPU compute (display only) |
-| `pixelflow-cli` | `upscale` (PNG in/out), `run` (launch, capture, process, present), `backends`, `info`, `bench` | Implemented; algorithm selection hardcoded (framework work in flight) |
+| `pixelflow-cli` | `upscale` (PNG in/out), `run` (launch, capture, process, present), `backends`, `info`, `algorithms`, `bench` | Implemented; algorithm selection reads the registry (`--algorithm`, default `contour`) |
 
 Processing contracts as they exist at HEAD:
 
@@ -74,7 +74,7 @@ Processing contracts as they exist at HEAD:
 
 ## 3. Algorithm integration framework
 
-Status: in flight (workstream, see §9). The framework must provide:
+Status: implemented and integrated (`c6accd0`, 2026-11-10). The framework provides:
 
 - A stable algorithm contract: identity and stable registration, name and
   description, versioning, supported input/output formats, scale factors
@@ -253,7 +253,22 @@ Contour product algorithm; do not confuse the two.
   stream, or frame has been observed. The owner's machine (NixOS,
   xdg-desktop-portal 1.20.4) is the live test environment; his next
   `pixelflow run` is the acceptance test. His compositor and
-  ScreenCast backend are still unknown.
+  ScreenCast backend are now known (2026-11-10 11:27): MangoWM
+  0.17.4 (wlroots-based), xdg-desktop-portal 1.20.4,
+  `/etc/xdg/xdg-desktop-portal/mango-portals.conf` sets
+  `org.freedesktop.impl.portal.ScreenCast=wlr` (default=gtk,
+  Screenshot=wlr, Secret=gnome-keyring), both gtk and wlr backend
+  services running.
+- SelectSources cancellation, cause confirmed on his machine: the
+  wlr backend's chooser fails at SelectSources, which surfaces as
+  portal-side Response code 1 (`Portal request was cancelled`).
+  The fix must be backend-general, not machine-specific: wlr shows
+  its chooser at SelectSources, GNOME/KDE at Start, so the same
+  user action fails at different protocol steps on different
+  backends. Required: robust lifecycle on both steps, fresh
+  sessions on retry, no silent target changes, monitor fallback
+  per the `CaptureConfig` contract. See the backend-general gaps
+  below.
 - New failure on the owner's machine after pulling the P1 commits
   (2026-11-10 10:53): session creates and cursor negotiation works
   (ScreenCast v5, offered SourceType(3), advertised CursorMode(3),
@@ -268,35 +283,54 @@ Contour product algorithm; do not confuse the two.
   code, the session handle is valid, and the request is well-formed
   for v5. The cancellation is a portal-side Response code 1: the
   source picker dialog was dismissed, or the compositor backend
-  cancelled the request. Open question: whether the picker dialog
-  appeared on his screen — that distinguishes the two causes and
-  cannot be answered from this VM. The close-after-failure
-  UnknownMethod is expected cleanup, not a second failure: the portal
-  destroyed the session object when the request was cancelled, so
-  `Close` on that path answers "object does not exist". Fix assigned
-  to the Wayland follow-up workstream: tolerant close-after-failure
-  classification, a factual cancelled-selection diagnostic naming the
-  two portal-side causes, and a mock scenario for a gone session on
-  close. No retry and no second SelectSources attempt: a cancelled
-  selection is a terminal failure for that run.
-- Portal-fix gaps found by verification (none fail the claimed fix;
-  follow-up work assigned): (1) Closed detection is a single
-  non-blocking poll after selection and in the Start error branch —
-  a Close arriving in the race window is detected via the Start
-  error, not prevented; no Closed check after Start succeeds before
-  `open_pipe_wire_remote`; a `receive_closed` subscription failure
-  logs and continues with detection off. (2) Latent unclosed path in
-  `capture.rs:51-55` if `take_fd()` returned `None` — practically
-  unreachable (`open` always sets the fd), no `Drop` close by design.
-  (3) Serial targeting usually will not engage against a real portal:
-  ashpd 0.14 parses only the `pipewire_serial` (underscore) key while
-  the portal specification wires `pipewire-serial` (hyphen), so the
-  node-id fallback is the live path. (4) A `PORTAL_RUNTIME` build
-  failure is cached forever with no retry. (5) The mock-portal test
-  silently skips without a session bus — a plain `cargo test` run
-  reports a green mock test that exercised nothing; the gate must run
-  it under `dbus-run-session` or the test must fail loudly.
-- GPU execution: UNVERIFIED and unimplemented. No adapter on this VM.
+  cancelled the request. The close-after-failure UnknownMethod is
+  expected cleanup, not a second failure: the portal destroyed the
+  session object when the request was cancelled, so `Close` on that
+  path answers "object does not exist". Fix landed in the Wayland
+  follow-up (`ffff504`): tolerant close-after-failure
+  classification (`session_already_gone`), a factual
+  cancelled-selection diagnostic naming the two portal-side causes,
+  and a mock scenario for a gone session on close. A cancelled
+  selection is still a terminal failure for that run until the
+  backend-general retry/fallback work lands (see below).
+- Backend-general gaps (verified against the code at `ffff504`;
+  workstream: backend-general Wayland, not started): (1) The
+  selected source type is logged (`portal.rs` prints
+  `stream.source_type()`) but never verified against the requested
+  `SourceKind` — a portal returning a monitor stream for a window
+  request (or the reverse) is silently accepted. (2) No monitor
+  fallback exists: `run.rs` makes one `initialize` attempt and
+  fails the run, although the `CaptureConfig` contract states
+  "monitor is the fallback when window capture is unavailable".
+  (3) No retry exists: a cancelled selection ends the run; a retry
+  must open a fresh portal session (a cancelled session's handle
+  is dead). `WaylandCapture::initialize` leaves the backend
+  uninitialized on every failure path (the portal is closed
+  before returning `Err`), so a second `initialize` call on the
+  same backend opens a fresh session — the structure supports
+  fallback, but no caller does it. (4) No cancelled-Start
+  diagnostic: GNOME/KDE show their chooser at Start, so a
+  chooser dismissal there needs the same factual treatment as the
+  cancelled-selection diagnostic. (5) Gap 3 from verification
+  stands: ashpd 0.14 parses only the `pipewire_serial`
+  (underscore) key while the portal specification wires
+  `pipewire-serial` (hyphen), so node-id fallback is the live
+  path; fixing it needs a raw D-Bus Start call bypassing ashpd's
+  typed `Request<Streams>`, which was judged not small and left
+  as is.
+- Portal-fix gaps found by verification, all fixed in the
+  follow-up (`ffff504`): (1) Closed detection is now checked
+  immediately before Start and after Start succeeds before
+  `open_pipe_wire_remote`; a `receive_closed` subscription
+  failure now fails the open instead of logging and continuing.
+  (2) The `capture.rs` unclosed path on `take_fd() == None` now
+  closes the session explicitly. (3) See backend-general gap
+  (5) above. (4) A `PORTAL_RUNTIME` build failure is retried
+  instead of cached forever. (5) The mock-portal test now fails
+  without a session bus (message names `dbus-run-session`); it
+  passes under `dbus-run-session` with all scenarios executing.
+- GPU execution: UNVERIFIED on a device. The crate is integrated;
+  no adapter on this VM.
 - Previous coordinator `338e91a0` (spawned 2026-11-10 07:22) is
   superseded by the current coordinator. It landed the portal fix and
   the PNG writer fix, then went quiet; it cannot be closed from the
@@ -304,21 +338,20 @@ Contour product algorithm; do not confuse the two.
   state was clean at handover; no uncommitted work was lost. A release
   test run (`cargo test --release`, separate target dir) observed in
   flight at 16:27 UTC may belong to its subtree.
-- "Algorithm 20" removal from user-facing output: owed, assigned to the
-  framework workstream (CLI `backends` line). Internal fixture files
-  (`*_20_*`) and test identifiers are not renamed.
+- "Algorithm 20" removal from user-facing output: done (`c6accd0`,
+  framework integration; `backends` prints the mechanism
+  description with no "algorithm 20"). The `contour.rs` module
+  header was scrubbed too. Internal fixture files (`*_20_*`) and
+  test identifiers were not renamed.
 - `docs/architecture.md` says Frame's fields are "public" — stale since
   encapsulation; unfixed.
-- `cargo clippy -p pixelflow-wayland --all-targets` fails with 10
-  pre-existing errors, all in `tests/mock_portal.rs` (unused `async`,
-  underscore-prefixed bindings, unused `self`, one 193-line test
-  function). The wayland lib itself is clean (the `pipewire.rs:240`
-  too-many-lines diagnostic from the portal fix was fixed by
-  `6b57eb3`, splitting stream setup out of `run_loop_inner`). The
-  mock-test lint errors belong to the Wayland follow-up rework of
-  that file; no `#[allow]` anywhere.
-- Wayland follow-up worker: finished its work; report pending
-  delivery to the coordinator, integration pending.
+- `cargo clippy -p pixelflow-wayland --all-targets` exits 0
+  (2026-11-10, after `ffff504` cleared the 10 `mock_portal.rs`
+  errors structurally: `MockFaults` grouping, sync zbus methods,
+  recorded call arguments, scenario helpers). The wayland lib was
+  already clean. No `#[allow]` anywhere.
+- Wayland follow-up: integrated and pushed at `ffff504`
+  (2026-11-10); full suite 194 passed / 0 failed at that HEAD.
 - Per-stage Contour timing is unmeasured (the bench has no per-stage
   support); allocation profiling with actual tools is still outstanding.
 - Live `--help` execution has not been run on this VM since the dev
@@ -344,11 +377,15 @@ Contour product algorithm; do not confuse the two.
   Baseline at `c1c3a88` verified by the coordinator (debug, 2026-11-10,
   `cargo test --workspace` under `dbus-run-session`, exit 0): 168 passed
   / 0 failed — the 155 from `4b1289a` plus 13 from `pixelflow-gpu`
-  (12 unit, 1 parity by honest skip: no adapter on this VM). The
-  wayland lib is clippy-clean; `cargo clippy --workspace
-  --all-targets` still fails on the 30 known `contour.rs` diagnostics
-  (ceiling) plus 10 pre-existing `mock_portal.rs` test-target errors
-  (see §7).
+  (12 unit, 1 parity by honest skip: no adapter on this VM).
+  Baseline at `ffff504` verified by the coordinator (debug, 2026-11-10,
+  `cargo test --workspace` under `dbus-run-session` with
+  `PIXELFLOW_FIXTURES_DIR` set, exit 0): 194 passed / 0 failed —
+  the 190 from the framework integration plus 4 new classifier
+  tests from the Wayland follow-up. Regression 3 passed with
+  fixtures exercised (38 s). `cargo clippy -p pixelflow-wayland
+  --all-targets` exits 0; `cargo clippy --workspace --all-targets`
+  still fails on the 30 known `contour.rs` diagnostics (ceiling).
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
@@ -375,10 +412,11 @@ integrates worktree work onto `main`.
 
 | Workstream | Owner | Scope | State |
 | --- | --- | --- | --- |
-| Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Completed in worktree, awaiting coordinator integration (report pending delivery) |
-| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM); live-path wiring pending framework integration |
+| Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Integrated and pushed at `c6accd0`; `ExecutionBackend` unified on the core contract type; contour header scrubbed |
+| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM); live-path/registry wiring pending (next: GPU-first workstream) |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
-| Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario | Finished; report pending delivery, integration pending |
+| Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
+| Wayland backend-general | to be spawned, fresh worktree off current main | Backend-general selection handling (wlr chooser at SelectSources, GNOME/KDE at Start); source-type verification (no silent target changes); monitor fallback per `CaptureConfig`; fresh sessions on retry; cancelled-Start diagnostic; mock scenarios | Not started; gaps verified in §7 |
 | Requirements/status | coordinator | This document | This file |
 
 Concurrent writers use isolated worktrees. Workers commit in their
@@ -445,30 +483,62 @@ a documented blocker.
   image, backend types) and the WGSL nearest-neighbour compute node
   with parity test. Integrated and pushed by the coordinator;
   `ls-remote` verified at `c1c3a88`.
+- `bab0c90`, `dc62543`, `1ba035e`, `ad8079f` — framework: stable
+  algorithm contract, registry + Bilinear, CLI registry selection,
+  integration guide. Integrated and pushed by the coordinator;
+  `ls-remote` verified at `c6accd0`.
+- `3ba4f27` — GPU: unify `ExecutionBackend` on the core contract
+  type (`pixelflow-gpu` re-exports `pixelflow_core::ExecutionBackend`;
+  `name()` moved to the core type).
+- `c6accd0` — Contour: drop the dead "Algorithm 20" name from the
+  module header (mechanism description kept).
+- `30fa31a`, `34aa8b6`, `0e5c1c2`, `fc5121e`, `456e84d` — Wayland
+  follow-up: Closed checks around Start + runtime-build retry,
+  close on missing PipeWire fd, mock fails loudly without a bus,
+  gone-session close classification + cancelled-selection
+  diagnostic, gone-session mock scenario. Integrated and pushed by
+  the coordinator; `ls-remote` verified at `ffff504`.
+- `ffff504` — Wayland: clear the mock portal clippy errors
+  structurally (`MockFaults` grouping, sync zbus methods, recorded
+  call arguments, scenario helpers; the Session version property
+  nobody reads is deleted). Wayland clippy clean; full suite 194
+  passed / 0 failed at this HEAD.
 
 ## 12. Remaining work and acceptance criteria
 
 In execution order (§11 of the owner directive):
 
-1. Baseline test suite at `4b1289a` — done (155 passed / 0 failed);
-   re-verified at `c1c3a88` — 168 passed / 0 failed.
+1. Baseline test suite — done at `4b1289a` (155 passed / 0 failed);
+   re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
+   (194 passed / 0 failed, fixtures exercised).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
-   recorded); live acceptance on the owner's machine still open.
-   Wayland follow-up fixes (gaps 1, 2, 4, 5; assess 3; plus the
-   cancelled-selection fix) — worker finished, integration pending
-   its report.
-3. Algorithm integration framework — completed in the framework
-   worktree, integration pending the worker's report; acceptance
-   per §3.
+   recorded). Wayland follow-up fixes — integrated at `ffff504`.
+   Live acceptance on the owner's machine still open: his backend
+   is wlr (MangoWM 0.17.4, chooser fails at SelectSources).
+3. Algorithm integration framework — integrated at `c6accd0`;
+   acceptance per §3. "Algorithm 20" removal — done with it.
 4. GPU processing with CPU retained — crate integrated at `c1c3a88`
    (WGSL nearest node, adapter fallback chain, no silent CPU
-   fallback); device run still required before any GPU claim, and
-   live-path/registry wiring pending framework integration.
-5. "Algorithm 20" removal from user-facing output — assigned to the
-   framework workstream.
+   fallback, `ExecutionBackend` unified on the core contract);
+   device run still required before any GPU claim. Live-path and
+   registry wiring of the GPU node is the next GPU workstream.
+5. Wayland backend-general (next workstream, not started):
+   source-type verification (no silent target changes); monitor
+   fallback per `CaptureConfig` (window failure → fresh monitor
+   session, reported explicitly); fresh sessions on retry;
+   cancelled-Start diagnostic for GNOME/KDE choosers; mock
+   scenarios for each. Acceptance: real frames from Window and
+   Monitor capture separately on the owner's machine.
 6. Continue Contour development without sacrificing any restoration
    responsibility (§4).
 7. Verify the live application path, performance, and regression
    behavior after integration.
-8. Keep this document accurate as work lands.
+8. Keep this document accurate as work lands. The master mandate
+   (2026-11-10 11:27) stands as the full product objective — 13
+   workstreams (Capture, Frame/resource architecture, Contour,
+   Algorithm framework, Processing graph, Region analysis, GPU
+   compute, Real-time runtime, Presentation, Offline processing,
+   Performance and quality, Platform support, Documentation).
+   Wayland is urgent but does not monopolize: GPU, Contour,
+   framework, and offline/benchmark work advance independently.
