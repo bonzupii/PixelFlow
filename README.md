@@ -81,6 +81,24 @@ cargo build --release
 ./target/release/pixelflow info
 ```
 
+## Nix
+
+A Nix dev shell (`nix develop`) provides the Rust toolchain
+(rustc and cargo 1.99.1, with clippy and rustfmt) and the
+system libraries the workspace links against: PipeWire,
+Wayland, libclang for bindgen, and the Vulkan loader and
+X11/Wayland windowing libraries winit and wgpu need. The
+flake is pinned by `flake.lock`.
+
+```bash
+nix develop
+```
+
+The flake provides a dev shell only; there are no packaging
+or profile-install outputs. Flakes need to be enabled
+(`experimental-features = nix-command flakes` in
+`~/.config/nix/nix.conf`, or the equivalent NixOS option).
+
 ## Verification
 
 `cargo build --release` is clean and `cargo test --release`
