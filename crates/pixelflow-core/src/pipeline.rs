@@ -5,7 +5,12 @@
 //! an integer scale factor. Capture backends, presentation, and the
 //! CLI all program against this trait, never against an algorithm.
 
+use crate::algorithm::{
+    AlgorithmConfig, AlgorithmError, ExecutionBackend, ParameterDescriptor, validate_config,
+};
+use crate::format::PixelFormat;
 use crate::frame::Frame;
+use crate::graph::{SpatialDependency, TemporalDependency};
 
 /// What row layouts an algorithm accepts. Nodes declare this;
 /// the graph executor reads the declaration and packs a strided
@@ -23,10 +28,123 @@ pub enum StrideSupport {
 
 /// An image processing algorithm: nearest neighbour, contour, and
 /// whatever comes later all implement this trait.
+///
+/// The trait carries the stable algorithm contract beyond the
+/// `process` call itself: the id, the description, the formats
+/// and scales, the validated parameters, the execution backends,
+/// the dependencies the graph executor reads, and the resource
+/// and determinism notes. The defaults describe a single-stage,
+/// CPU-only, deterministic RGB8 algorithm with no parameters;
+/// an algorithm overrides only what differs. The registry reads
+/// these methods into an [`AlgorithmDescriptor`] (see
+/// `crate::algorithm`), so the description and the
+/// implementation cannot drift apart.
 pub trait Processor {
     /// Short stable name, e.g. "contour" or "nearest". Used in
     /// configuration and in CLI output.
     fn name(&self) -> &'static str;
+
+    /// Stable algorithm id. The registry lookup key and the
+    /// command-line name; the default is the processor name.
+    fn algorithm_id(&self) -> &'static str {
+        self.name()
+    }
+
+    /// What the algorithm does, in one sentence. Shown by the
+    /// CLI when it lists algorithms.
+    fn description(&self) -> &'static str {
+        ""
+    }
+
+    /// Algorithm version.
+    fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    /// Input pixel formats the algorithm accepts. The default
+    /// is RGB8 only; `process` rejects anything else.
+    fn input_formats(&self) -> &[PixelFormat] {
+        &[PixelFormat::Rgb8]
+    }
+
+    /// Output pixel formats the algorithm produces. The default
+    /// is RGB8.
+    fn output_formats(&self) -> &[PixelFormat] {
+        &[PixelFormat::Rgb8]
+    }
+
+    /// Execution backends the algorithm can run on. The default
+    /// is CPU only.
+    fn backends(&self) -> &[ExecutionBackend] {
+        &[ExecutionBackend::Cpu]
+    }
+
+    /// What input area one output pixel depends on. The default
+    /// is [`SpatialDependency::Global`]: the honest declaration
+    /// for an algorithm that has not stated a tighter one.
+    fn spatial_dependency(&self) -> SpatialDependency {
+        SpatialDependency::Global
+    }
+
+    /// What history the algorithm keeps between frames. The
+    /// default is stateless.
+    fn temporal_dependency(&self) -> TemporalDependency {
+        TemporalDependency::Stateless
+    }
+
+    /// Validated algorithm-specific parameters. The default is
+    /// no parameters: any set value fails validation.
+    fn parameters(&self) -> &[ParameterDescriptor] {
+        &[]
+    }
+
+    /// Working memory per output pixel, in bytes, when the
+    /// working set is a flat per-pixel figure. `None` when the
+    /// working set has no such figure — the algorithm's own
+    /// budget check states its model instead.
+    fn working_bytes_per_output_pixel(&self) -> Option<u64> {
+        None
+    }
+
+    /// Intermediate resources a multi-stage algorithm holds
+    /// between its stages, named so a caller can account for
+    /// them. Empty for a single-stage algorithm.
+    fn intermediate_resources(&self) -> &[&'static str] {
+        &[]
+    }
+
+    /// True when the same input frame, scale, and configuration
+    /// always produce byte-identical output.
+    fn deterministic(&self) -> bool {
+        true
+    }
+
+    /// What determinism means for this algorithm, or why it
+    /// does not hold.
+    fn determinism_note(&self) -> &'static str {
+        "deterministic: the same input frame, scale, and configuration produce byte-identical output"
+    }
+
+    /// Graph node stage names, in run order, for a multi-stage
+    /// algorithm: one name per node its factory builds. Empty
+    /// for a single-stage algorithm, which the descriptor then
+    /// names after the algorithm id.
+    fn stage_names(&self) -> &[&'static str] {
+        &[]
+    }
+
+    /// Validate `config` against this algorithm's parameters:
+    /// every set parameter must be declared, of the declared
+    /// type, and inside its range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AlgorithmError::InvalidConfig`] for an unknown
+    /// parameter, a wrongly typed value, or a value outside its
+    /// range.
+    fn validate_config(&self, config: &AlgorithmConfig) -> Result<(), AlgorithmError> {
+        validate_config(self.parameters(), self.algorithm_id(), config)
+    }
 
     /// Integer scale factors this algorithm supports, e.g. [2, 4].
     fn supported_scales(&self) -> &[u32];
@@ -157,3 +275,89 @@ impl std::fmt::Display for ProcessError {
 }
 
 impl std::error::Error for ProcessError {}
+
+/// A boxed processor is itself a processor: every contract
+/// method delegates to the boxed value. This is what lets the
+/// registry hand a type-erased processor to [`ProcessorNode`]
+/// without a match arm per algorithm.
+impl Processor for Box<dyn Processor> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+
+    fn algorithm_id(&self) -> &'static str {
+        (**self).algorithm_id()
+    }
+
+    fn description(&self) -> &'static str {
+        (**self).description()
+    }
+
+    fn version(&self) -> &'static str {
+        (**self).version()
+    }
+
+    fn input_formats(&self) -> &[PixelFormat] {
+        (**self).input_formats()
+    }
+
+    fn output_formats(&self) -> &[PixelFormat] {
+        (**self).output_formats()
+    }
+
+    fn backends(&self) -> &[ExecutionBackend] {
+        (**self).backends()
+    }
+
+    fn spatial_dependency(&self) -> SpatialDependency {
+        (**self).spatial_dependency()
+    }
+
+    fn temporal_dependency(&self) -> TemporalDependency {
+        (**self).temporal_dependency()
+    }
+
+    fn parameters(&self) -> &[ParameterDescriptor] {
+        (**self).parameters()
+    }
+
+    fn working_bytes_per_output_pixel(&self) -> Option<u64> {
+        (**self).working_bytes_per_output_pixel()
+    }
+
+    fn intermediate_resources(&self) -> &[&'static str] {
+        (**self).intermediate_resources()
+    }
+
+    fn deterministic(&self) -> bool {
+        (**self).deterministic()
+    }
+
+    fn determinism_note(&self) -> &'static str {
+        (**self).determinism_note()
+    }
+
+    fn stage_names(&self) -> &[&'static str] {
+        (**self).stage_names()
+    }
+
+    fn validate_config(&self, config: &AlgorithmConfig) -> Result<(), AlgorithmError> {
+        (**self).validate_config(config)
+    }
+
+    fn supported_scales(&self) -> &[u32] {
+        (**self).supported_scales()
+    }
+
+    fn stride_support(&self) -> StrideSupport {
+        (**self).stride_support()
+    }
+
+    fn tile_safe(&self) -> bool {
+        (**self).tile_safe()
+    }
+
+    fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
+        (**self).process(frame, scale)
+    }
+}

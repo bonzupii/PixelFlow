@@ -206,6 +206,18 @@ impl<P: Processor> ProcessorNode<P> {
     }
 }
 
+impl ProcessorNode<Box<dyn Processor>> {
+    /// Wrap a type-erased processor as a node that runs it at
+    /// `scale`, declaring the spatial dependency the processor
+    /// itself states. The registry builds nodes this way, so no
+    /// per-algorithm match arm is needed to wrap a processor.
+    #[must_use]
+    pub fn from_processor(processor: Box<dyn Processor>, scale: u32) -> Self {
+        let spatial = processor.spatial_dependency();
+        Self::new(processor, scale, spatial)
+    }
+}
+
 impl<P: Processor> Node for ProcessorNode<P> {
     fn name(&self) -> &'static str {
         self.processor.name()
