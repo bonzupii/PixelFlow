@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `28b466f`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `d2e057e`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -326,9 +326,28 @@ Contour product algorithm; do not confuse the two.
   `6bbc989`): monitor fallback starts and PipeWire connects, but
   no frames reach presentation — no output window, game stays at
   native resolution. Window capture still fails at SelectSources.
-  The frame path (PipeWire buffers, processing, presentation) is
-  under fix by the frame-delivery worker; session opened and
-  PipeWire connected do not count as success.
+  Verdict from the frame-delivery work (`d2e057e`, 2026-11-10):
+  no defect exists in the frame transport — a synthetic-source
+  reproduction test (capture → slot → processing → publish → wake
+  → presenter receipt) passes on the base code, and the earlier
+  review findings 1, 2, 3, 5 were re-verified fixed in the current
+  code. What stops frames is measured cost: Contour @4x on a
+  uniform 1920x1080 frame takes 151.9 s in the debug binary
+  (coordinator-measured, matches the worker's 152.2 s) and 9.1 s
+  in release, byte-identical output — so for any observation under
+  ~2.5 minutes the debug run looks exactly like the report. The
+  owner's 13.83 s build is a debug build (a release build takes
+  7m41s on this VM), so his live runs pay the debug cost. Even in
+  release 9.1 s/frame is 0.11 fps, not live video: Contour @4x on
+  1080p input is not a live algorithm at any build profile. The
+  missing presentation window is NOT explained by any in-process
+  defect found — the window is created at loop start independent
+  of frames — and still needs the owner's machine: presenter /
+  adapter boundary or the process having exited. Control run
+  (fast path): `pixelflow run <game> --capture monitor --scale 2
+  --algorithm nearest --windowed` — expect a window within ~1 s;
+  if no window appears there either, the defect is
+  presenter/adapter-side, not capture.
 - Portal-fix gaps found by verification, all fixed in the
   follow-up (`ffff504`): (1) Closed detection is now checked
   immediately before Start and after Start succeeds before
@@ -404,6 +423,20 @@ Contour product algorithm; do not confuse the two.
   coordinator (debug, 2026-11-10, same gates, exit 0): 213 passed
   / 0 failed — the 199 from `d3c4b41` plus 14 new GPU wiring tests
   (6 GPU factory unit, 3 registry integration, 4 `run.rs`, 1 `main.rs`).
+  Baseline at `d2e057e` verified by the coordinator (debug, 2026-11-10,
+  same gates, exit 0): 217 passed / 0 failed — the 213 from `aea977c`
+  plus 4 new frame-path tests (3 processing-thread, 1 presenter
+  receipt). The frame-path reproduction test passes on the base code
+  as well as after the change: it pins the path and localizes the
+  live stall to Contour execution time; it is not a
+  failing-before/passing-after pair.
+- Environment note (2026-11-10): a VM restart mid-task wiped the
+  `/usr` dev libraries (`libpipewire-0.3`, `libclang`, C headers).
+  They were restored from Ubuntu Noble `.deb` files; `cargo` runs in
+  this VM need `LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu/libclang-18.so.1`
+  and `BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/14/include"`,
+  or `libspa-sys` bindgen fails (`stdbool.h` not found). `/usr` does
+  not survive VM replacements; nothing reinstalls these automatically.
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
@@ -433,7 +466,7 @@ integrates worktree work onto `main`.
 | Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Integrated and pushed at `c6accd0`; `ExecutionBackend` unified on the core contract type; contour header scrubbed |
 | GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM) |
 | GPU live-path wiring | GPU wiring worker, worktree `~/workspace/pixelflow-gpu-wire`, branch `gpu/live-path` | Register `nearest-gpu` in the CLI registry; live `run` path resolves `nearest` to the GPU node with an adapter, reports the effective backend, errors loudly for explicit GPU requests with no adapter | Integrated and pushed at `aea977c`; full suite 213 passed / 0 failed; device run and live-path parity still unverified (no adapter on this VM) |
-| Frame delivery | frame-delivery worker, worktree `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery` | Trace the frame path (PipeWire buffers, processing, presentation) to where frames stop on the owner's machine; smallest fix; reproduction test | In progress (spawned 2026-11-10 12:16); base `28b466f` |
+| Frame delivery | frame-delivery worker, worktree `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery` | Trace the frame path (PipeWire buffers, processing, presentation) to where frames stop on the owner's machine; smallest fix; reproduction test | Integrated and pushed at `d2e057e`; full suite 217 passed / 0 failed; verdict: no transport defect, stall is Contour cost (151.9 s debug / 9.1 s release per 1920x1080 @4x frame); missing presentation window still unexplained in-process, needs the owner's-machine control run |
 | Region routing | unassigned — worker `19add74f` closed explicitly by the coordinator 2026-11-10 after 1m37s with no result, to avoid a second concurrent writer on `run.rs` while the frame-delivery fix runs | Meaningful per-class routing with genuinely different paths (not all-to-Contour); routing table + resolver; masks/overrides precedence; hysteresis/halo | Open workstream, not dropped; respawn after the frame-delivery fix lands |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
@@ -532,7 +565,7 @@ In execution order (§11 of the owner directive):
 1. Baseline test suite — done at `4b1289a` (155 passed / 0 failed);
    re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
    (194 passed / 0 failed, fixtures exercised), at `d3c4b41` (199),
-   at `aea977c` (213).
+   at `aea977c` (213), at `d2e057e` (217).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
@@ -543,9 +576,14 @@ In execution order (§11 of the owner directive):
    fallback starts (selection complete, PipeWire connected, node 65
    then 119, 1920x1080, "capturing monitor") but no output window
    appears and the game stays at native resolution: no frames reach
-   presentation. Frame-delivery fix in progress (worktree
-   `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery`,
-   base `28b466f`). Acceptance, each reported separately: (1)
+   presentation. Frame-delivery work integrated at `d2e057e`: no
+   transport defect found (reproduction test passes on base code);
+   the stall is Contour cost — 151.9 s/frame debug, 9.1 s/frame
+   release at 1920x1080 @4x, byte-identical output. Missing
+   presentation window still unexplained in-process; control run
+   on the owner's machine: `pixelflow run <game> --capture monitor
+   --scale 2 --algorithm nearest --windowed`, expect a window
+   within ~1 s. Acceptance, each reported separately: (1)
    window capture delivers frames, or monitor fallback delivers
    frames — separately, fallback is not window capture; (2)
    transformed output visible (game upscaled, not native
