@@ -21,6 +21,7 @@ use crate::algorithms::contour::ContourAlgorithm;
 use crate::algorithms::lanczos3::Lanczos3Algorithm;
 use crate::algorithms::nearest::NearestAlgorithm;
 use crate::algorithms::pixelflow::PixelFlowAlgorithm;
+use crate::algorithms::scale2x::Scale2xAlgorithm;
 use pixelflow_core::{
     AlgorithmConfig, AlgorithmDescriptor, AlgorithmError, AlgorithmFactory, Graph, GraphBuilder,
     Node, Source,
@@ -43,8 +44,8 @@ impl AlgorithmRegistry {
     }
 
     /// The registry with every built-in algorithm registered:
-    /// Contour, Nearest, Bilinear, Bicubic, Lanczos3, and
-    /// `PixelFlow`.
+    /// Contour, Nearest, Bilinear, Bicubic, Lanczos3, Scale2x,
+    /// and `PixelFlow`.
     #[must_use]
     pub fn builtin() -> Self {
         let mut registry = Self::new();
@@ -53,6 +54,7 @@ impl AlgorithmRegistry {
         registry.register(Box::new(BilinearAlgorithm));
         registry.register(Box::new(BicubicAlgorithm));
         registry.register(Box::new(Lanczos3Algorithm));
+        registry.register(Box::new(Scale2xAlgorithm));
         registry.register(Box::new(PixelFlowAlgorithm));
         registry
     }

@@ -23,7 +23,7 @@
 //! shift rows, and the test would catch it.
 
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
-use pixelflow_processing::{Bicubic, Contour, Lanczos3, Nearest, PixelFlow};
+use pixelflow_processing::{Bicubic, Contour, Lanczos3, Nearest, PixelFlow, Scale2x};
 
 /// Reduce a value into one byte. The modulo makes the conversion
 /// infallible; the fallback arm is unreachable by construction.
@@ -1082,6 +1082,116 @@ fn lanczos3_strided_input_matches_tight_input() -> Result<(), String> {
 #[test]
 fn lanczos3_repeated_processing_is_deterministic() -> Result<(), String> {
     let algo = Lanczos3;
+    let inputs: Vec<Frame> = vec![
+        flat_frame(8, 8, [128, 64, 32])?,
+        rgb_frame(32, 16, |col, row| {
+            if row * 2 < col {
+                [255, 255, 255]
+            } else {
+                [0, 0, 0]
+            }
+        })?,
+        rgb_frame(8, 8, |col, row| {
+            if (col + row) % 2 == 0 {
+                [0, 0, 0]
+            } else {
+                [255, 255, 255]
+            }
+        })?,
+    ];
+    for input in &inputs {
+        for scale in [2, 4] {
+            let first = algo.process(input, scale).map_err(|err| err.to_string())?;
+            let second = algo.process(input, scale).map_err(|err| err.to_string())?;
+            assert_eq!(
+                first.data(),
+                second.data(),
+                "{}x{} at {scale}x: second pass differs",
+                input.width(),
+                input.height()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scale2x_tiny_images_complete_at_both_scales() -> Result<(), String> {
+    let algo = Scale2x;
+    for (width, height) in [(1, 1), (2, 1), (1, 2), (2, 2), (3, 3), (1, 4), (4, 1)] {
+        let input = rgb_frame(width, height, |col, row| {
+            [
+                byte_of(col * 37 + row * 91),
+                byte_of(col * 11 + row * 53),
+                128,
+            ]
+        })?;
+        for scale in [2, 4] {
+            let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
+            let scale_u = u32::try_from(scale).map_err(|err| err.to_string())?;
+            let scale_us = usize::try_from(scale).map_err(|err| err.to_string())?;
+            assert_eq!(
+                (out.width(), out.height()),
+                (
+                    u32::try_from(width).map_err(|err| err.to_string())? * scale_u,
+                    u32::try_from(height).map_err(|err| err.to_string())? * scale_u
+                ),
+                "{width}x{height} at {scale}x: dims"
+            );
+            assert_eq!(out.format(), PixelFormat::Rgb8);
+            assert_eq!(out.data().len(), width * scale_us * height * scale_us * 3);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scale2x_flat_color_is_preserved_exactly() -> Result<(), String> {
+    // Re-measurement 1: every output pixel is a copy of one of
+    // the five pixels the rule reads, so a flat input is
+    // preserved exactly at both scales: shift 0.
+    let algo = Scale2x;
+    let input = flat_frame(8, 8, [128, 64, 32])?;
+    for scale in [2, 4] {
+        let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
+        assert_eq!(
+            distinct_colors(&out),
+            vec![[128, 64, 32]],
+            "flat [128,64,32] at {scale}x moved"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn scale2x_strided_input_matches_tight_input() -> Result<(), String> {
+    let tight = rgb_frame(4, 4, |col, row| {
+        if col + row < 4 {
+            [200, 30, 30]
+        } else {
+            [30, 30, 200]
+        }
+    })?;
+    let mut data = vec![0u8; 4 * 16];
+    for y in 0..4 {
+        data[y * 16..y * 16 + 12]
+            .copy_from_slice(tight.row(u32::try_from(y).map_err(|err| err.to_string())?));
+    }
+    let strided = Frame::new_with_stride(4, 4, PixelFormat::Rgb8, 16, data)
+        .map_err(|err| err.to_string())?
+        .with_sequence(9);
+    let algo = Scale2x;
+    let from_tight = algo.process(&tight, 2).map_err(|err| err.to_string())?;
+    let from_strided = algo.process(&strided, 2).map_err(|err| err.to_string())?;
+    assert_eq!(from_strided.data(), from_tight.data());
+    assert_eq!(from_strided.sequence(), 9);
+    assert_eq!(from_strided.timestamp(), strided.timestamp());
+    Ok(())
+}
+
+#[test]
+fn scale2x_repeated_processing_is_deterministic() -> Result<(), String> {
+    let algo = Scale2x;
     let inputs: Vec<Frame> = vec![
         flat_frame(8, 8, [128, 64, 32])?,
         rgb_frame(32, 16, |col, row| {

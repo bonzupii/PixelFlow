@@ -15,6 +15,7 @@ pub use algorithms::contour::{Contour, ContourAlgorithm, LimitedContour};
 pub use algorithms::lanczos3::{Lanczos3, Lanczos3Algorithm};
 pub use algorithms::nearest::{Nearest, NearestAlgorithm};
 pub use algorithms::pixelflow::{PixelFlow, PixelFlowAlgorithm};
+pub use algorithms::scale2x::{Scale2x, Scale2xAlgorithm};
 pub use pixelflow_core::{
     AlgorithmConfig, AlgorithmDescriptor, AlgorithmError, AlgorithmFactory, AlgorithmOrigin,
     ConfigValue, ExecutionBackend, ParameterDescriptor, ParameterKind,

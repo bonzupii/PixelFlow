@@ -6,3 +6,4 @@ pub mod contour;
 pub mod lanczos3;
 pub mod nearest;
 pub mod pixelflow;
+pub mod scale2x;

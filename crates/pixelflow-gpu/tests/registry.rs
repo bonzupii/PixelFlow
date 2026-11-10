@@ -20,6 +20,7 @@ fn builtin_registry_holds_only_the_cpu_algorithms() {
             "bilinear",
             "bicubic",
             "lanczos3",
+            "scale2x",
             "pixelflow"
         ]
     );
@@ -41,6 +42,7 @@ fn gpu_nearest_registers_and_describes_through_the_registry() {
             "bilinear",
             "bicubic",
             "lanczos3",
+            "scale2x",
             "pixelflow",
             "nearest-gpu"
         ]
@@ -72,6 +74,7 @@ fn gpu_nearest_lookup_fails_with_the_available_ids() {
                     "bilinear",
                     "bicubic",
                     "lanczos3",
+                    "scale2x",
                     "pixelflow"
                 ]
             );
