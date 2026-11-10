@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `9f9fb0e`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `afa6f46`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -441,6 +441,9 @@ Contour product algorithm; do not confuse the two.
   as well as after the change: it pins the path and localizes the
   live stall to Contour execution time; it is not a
   failing-before/passing-after pair.
+  Baseline at `afa6f46` verified by the coordinator (debug, 2026-11-10,
+  same gates, exit 0): 226 passed / 0 failed — the 217 from `d2e057e`
+  plus 9 new region-routing tests (8 `region_analysis`, 1 CLI).
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -484,7 +487,7 @@ integrates worktree work onto `main`.
 | GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM) |
 | GPU live-path wiring | GPU wiring worker, worktree `~/workspace/pixelflow-gpu-wire`, branch `gpu/live-path` | Register `nearest-gpu` in the CLI registry; live `run` path resolves `nearest` to the GPU node with an adapter, reports the effective backend, errors loudly for explicit GPU requests with no adapter | Integrated and pushed at `aea977c`; full suite 213 passed / 0 failed; device run and live-path parity still unverified (no adapter on this VM) |
 | Frame delivery | frame-delivery worker, worktree `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery` | Trace the frame path (PipeWire buffers, processing, presentation) to where frames stop on the owner's machine; smallest fix; reproduction test | Integrated and pushed at `d2e057e`; full suite 217 passed / 0 failed; verdict: no transport defect, stall is Contour cost (151.9 s debug / 9.1 s release per 1920x1080 @4x frame); missing presentation window still unexplained in-process, needs the owner's-machine control run |
-| Region routing | region-routing worker, worktree `~/workspace/pixelflow-region-routing`, branch `framework/region-routing` | Meaningful per-class routing with genuinely different paths (not all-to-Contour); routing table + resolver; masks/overrides precedence; hysteresis/halo | Implemented in worktree (`ec69d63`, `d6c846a`); full suite 226 passed / 0 failed; pending coordinator review and push |
+| Region routing | region-routing worker, worktree `~/workspace/pixelflow-region-routing`, branch `framework/region-routing` | Meaningful per-class routing with genuinely different paths (not all-to-Contour); routing table + resolver; masks/overrides precedence; hysteresis/halo | Integrated and pushed at `afa6f46`; full suite 226 passed / 0 failed; live acceptance and any GPU-device run still unverified |
 | Docs cleanup | docs worker, worktree `~/workspace/pixelflow-docs`, branch `docs/readme-cleanup` | README rewritten as a verified product interface; per-document disposition (retained/corrected, none removed); `run.rs` simplification (shutdown discards collapsed, unreachable stage branches removed) | Integrated and pushed at `9f9fb0e`; full suite 217 passed / 0 failed; `docs/engineering-mandate.md` untouched |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
@@ -583,7 +586,7 @@ In execution order (§11 of the owner directive):
 1. Baseline test suite — done at `4b1289a` (155 passed / 0 failed);
    re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
    (194 passed / 0 failed, fixtures exercised), at `d3c4b41` (199),
-   at `aea977c` (213), at `d2e057e` (217).
+   at `aea977c` (213), at `d2e057e` (217), at `afa6f46` (226).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
