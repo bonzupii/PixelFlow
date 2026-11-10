@@ -348,6 +348,22 @@ Contour product algorithm; do not confuse the two.
   --algorithm nearest --windowed` — expect a window within ~1 s;
   if no window appears there either, the defect is
   presenter/adapter-side, not capture.
+- Cancelled window selection is terminal in code (2026-11-10,
+  `71dcefd`/`70cb8d0`/`4ab112b`): a cancelled SelectSources or
+  Start response maps to typed `WaylandError::SelectionCancelled`
+  / `CaptureError::SelectionCancelled` (one mapping,
+  `selection_response_error` in `portal.rs`, for both calls), and
+  `run.rs` `initialize_capture` ends the run on it with no monitor
+  attempt; an unavailable window (`SourceUnavailable`, now typed
+  through `CaptureError`) still falls back to monitor once.
+  Mock-portal scenarios in `run.rs` pin both paths, and
+  `portal.rs` pins the mapping. Full suite 233 passed / 0 failed
+  (baseline 226 + 7 new). The window request itself is unchanged:
+  it differs from the monitor request only in the `types` bit
+  (`run_session`), and the wlr backend runs its chooser at
+  SelectSources, so a Cancelled response there means the chooser
+  failed or was dismissed. Whether any chooser UI appeared on the
+  owner's machine is still open.
 - Portal-fix gaps found by verification, all fixed in the
   follow-up (`ffff504`): (1) Closed detection is now checked
   immediately before Start and after Start succeeds before
