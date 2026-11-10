@@ -145,11 +145,15 @@ to fix silently; Contour output does not change until the owner decides.
 - **GPU execution is unverified on a device.** The `nearest-gpu` node is
   wired into the registry and the live path, but no adapter exists on
   the build VM, so no GPU compute has run against hardware.
-- **Region routing changes no pixels yet.** Tiles are classified and
-  routed, but every branch routes to the same algorithm node; there are
-  no per-branch processors. The incremental executor exists in the
-  graph, but the live path runs whole-frame because Contour declares a
-  global spatial dependency.
+- **Region routing runs each tile through its class's algorithm.**
+  Tiles are classified and routed per class: text and sprites through
+  Contour, flat and patterned backgrounds through Nearest, gradients
+  through Bilinear, unknown or mixed tiles through the selected
+  algorithm. Each branch runs whole-frame and the outputs are
+  composited tile by tile, so Contour output is unchanged where it is
+  the route. The incremental executor exists in the graph, but the live
+  path runs whole-frame because Contour declares a global spatial
+  dependency.
 
 ## Documentation
 

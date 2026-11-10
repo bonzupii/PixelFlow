@@ -16,13 +16,17 @@ classes, confidence scores, hysteresis, reclassification
 gating, user overrides, and a flicker count
 (`RegionMap::class_changes_since`). It is wired into the live
 `run` path, which analyzes each frame dirty-restricted and
-hands routes and halo invalidation to the graph. What is not
-implemented: per-branch processors — every branch routes to
-the same algorithm node, so routing changes no pixels — and
-capture damage input (no backend supplies damage; the dirty
-set is computed by comparing frames). The `FrameData` enum and
-buffer pooling are still open. Section 12 records the status
-of each implementation step.
+hands routes and halo invalidation to the graph. Per-branch
+processors are implemented: the live path builds one graph
+per algorithm the routing table names (text and sprite
+through Contour, flat and patterned through Nearest,
+gradient through Bilinear, unknown through the selected
+algorithm) and composites the branch outputs tile by tile.
+What is not implemented: capture damage input (no backend
+supplies damage; the dirty set is computed by comparing
+frames). The `FrameData` enum and buffer pooling are still
+open. Section 12 records the status of each implementation
+step.
 
 ## 1. Purpose and scope
 
@@ -287,9 +291,19 @@ does not silently change meaning when the detector improves.
   path. `Unknown` always uses the general path.
 - Routing parameters (which branch per class, the confidence
   threshold, the halo radii) are profile settings with defaults.
-  The default profile routes only `Text` and `Sprite`
-  differently and leaves everything else on the general path
-  until the detector earns trust.
+  The default profile routes every class to its branch: Text
+  and Sprite to the Contour branch, Flat and Patterned to the
+  Nearest branch, Gradient to the Bilinear branch. The branch
+  names are the profile's; what processes a branch is the
+  routing table in `region_analysis.rs`, which maps each class
+  to its algorithm id. The live `run` path builds one graph
+  per algorithm the table names, runs only the graphs the
+  frame's tiles need, and composites the outputs tile by tile,
+  so a tile is processed by the algorithm its class routes to.
+  Each branch graph runs whole-frame, so a branch output is
+  computed with its full frame context and the halo is not
+  needed to avoid seams there; the halo still applies to
+  invalidation for the incremental executor.
 
 ## 10. Temporal stability
 
@@ -347,10 +361,16 @@ most appropriate processing is needed. That is the whole point.
    tile overrides, wired into the graph and the live run path
    (`28d78b3`, `c6accd0`).
 3. **Content-aware routing.** Different routines per region,
-   with the general-path fallback. Stage III. OPEN: branches
-   are wired (text, sprite, general) but all route to the same
-   algorithm node; no per-branch processors exist yet, so
-   routing changes no pixels.
+   with the general-path fallback. Stage III. LANDED: each
+   class routes to the algorithm that fits it (Text and Sprite
+   to Contour, Flat and Patterned to Nearest, Gradient to
+   Bilinear, Unknown to the general path), as one routing
+   table plus one resolver in `region_analysis.rs`
+   (`ec69d63`), wired into the live `run` path as one graph
+   per algorithm with tile-aligned compositing (`d6c846a`).
+   Each branch graph runs whole-frame; only the graphs a
+   frame's tiles need run, so an all-flat frame never runs
+   Contour.
 4. **Temporal stability.** Hysteresis, reclassification gating,
    flicker measurement. Stages III/IV. PARTLY LANDED:
    hysteresis and reclassification gating live in the analyzer,
