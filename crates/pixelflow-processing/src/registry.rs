@@ -18,6 +18,7 @@
 use crate::algorithms::bicubic::BicubicAlgorithm;
 use crate::algorithms::bilinear::BilinearAlgorithm;
 use crate::algorithms::contour::ContourAlgorithm;
+use crate::algorithms::lanczos3::Lanczos3Algorithm;
 use crate::algorithms::nearest::NearestAlgorithm;
 use crate::algorithms::pixelflow::PixelFlowAlgorithm;
 use pixelflow_core::{
@@ -42,7 +43,8 @@ impl AlgorithmRegistry {
     }
 
     /// The registry with every built-in algorithm registered:
-    /// Contour, Nearest, Bilinear, Bicubic, and `PixelFlow`.
+    /// Contour, Nearest, Bilinear, Bicubic, Lanczos3, and
+    /// `PixelFlow`.
     #[must_use]
     pub fn builtin() -> Self {
         let mut registry = Self::new();
@@ -50,6 +52,7 @@ impl AlgorithmRegistry {
         registry.register(Box::new(NearestAlgorithm));
         registry.register(Box::new(BilinearAlgorithm));
         registry.register(Box::new(BicubicAlgorithm));
+        registry.register(Box::new(Lanczos3Algorithm));
         registry.register(Box::new(PixelFlowAlgorithm));
         registry
     }

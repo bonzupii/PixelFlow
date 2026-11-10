@@ -3,5 +3,6 @@
 pub mod bicubic;
 pub mod bilinear;
 pub mod contour;
+pub mod lanczos3;
 pub mod nearest;
 pub mod pixelflow;
