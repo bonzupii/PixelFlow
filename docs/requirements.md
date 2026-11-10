@@ -380,6 +380,9 @@ a documented blocker.
   targeting, shared process runtime, mock-portal test).
 - `4b1289a` — CLI: pass the whole image to the PNG writer at once
   (fixes every `upscale` failing at save with wrong data size).
+  Verified end to end by the coordinator (2026-11-10): `pixelflow
+  upscale` on `ct.png` (256x222) at 2x nearest exits 0 and writes a
+  512x444 PNG.
 
 ## 12. Remaining work and acceptance criteria
 
