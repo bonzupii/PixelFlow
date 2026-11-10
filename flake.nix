@@ -29,6 +29,7 @@
           libXrandr
           libxcb
           vulkan-loader
+          zsnes
         ];
 
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
