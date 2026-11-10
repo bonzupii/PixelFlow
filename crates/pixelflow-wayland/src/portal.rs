@@ -34,8 +34,10 @@ use std::sync::OnceLock;
 /// connection once the first session's runtime was dropped and
 /// every later open would hang. A multi-thread runtime keeps the
 /// connection driven between calls and lets opens and closes run
-/// from any thread.
-static PORTAL_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> = OnceLock::new();
+/// from any thread. Only a successfully built runtime is cached:
+/// a failed build is reported and retried on the next call, never
+/// stored, so one transient failure cannot fail every later open.
+static PORTAL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// The shared portal runtime, built on first use.
 ///
@@ -43,13 +45,14 @@ static PORTAL_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, std::io::Error>>
 ///
 /// Returns `Portal` when the runtime cannot be built.
 fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, WaylandError> {
-    let slot = PORTAL_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-    });
-    match slot {
-        Ok(runtime) => Ok(runtime),
+    if let Some(runtime) = PORTAL_RUNTIME.get() {
+        return Ok(runtime);
+    }
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Ok(PORTAL_RUNTIME.get_or_init(|| runtime)),
         Err(error) => Err(WaylandError::Portal(format!(
             "build portal runtime: {error}"
         ))),
@@ -306,20 +309,16 @@ impl PortalSession {
         version: u32,
     ) -> Result<SessionOutcome, WaylandError> {
         // The Closed stream borrows the session, so it lives here
-        // as a local. A failed subscription is logged and the
-        // session continues without it: the signal is diagnostic,
-        // and losing it must not fail a session that is otherwise
-        // fine.
-        let mut closed = match session.receive_closed().await {
-            Ok(stream) => Some(stream),
-            Err(error) => {
-                eprintln!(
-                    "pixelflow: portal: session {handle}: could not subscribe to the Closed signal, session closure will not be reported: {}",
-                    format_ashpd_error(&error)
-                );
-                None
-            }
-        };
+        // as a local. A failed subscription fails the open: the
+        // signal is the only way the code learns the portal closed
+        // the session before Start, so a session without it could
+        // be started after the portal already closed it.
+        let mut closed = Some(
+            session
+                .receive_closed()
+                .await
+                .map_err(|e| portal_error("subscribe to Closed signal", &e))?,
+        );
         let mut options = SelectSourcesOptions::default()
             .set_sources(want)
             .set_multiple(false);
@@ -350,6 +349,15 @@ impl PortalSession {
                 "session {handle} was closed by the portal after source selection"
             )));
         }
+        // A Closed signal can arrive between the check above and
+        // the Start call below, so poll again immediately before
+        // starting: starting a session the portal already closed
+        // fails with a misleading error and wastes the dialog.
+        if closed_signalled(&mut closed) {
+            return Err(WaylandError::Portal(format!(
+                "session {handle} was closed by the portal before start"
+            )));
+        }
         let start = match proxy
             .start(session, None, StartCastOptions::default())
             .await
@@ -367,6 +375,15 @@ impl PortalSession {
         let streams = start
             .response()
             .map_err(|e| portal_error("read start response", &e))?;
+        // The portal can close the session while the Start response
+        // is in flight, so check again before opening the PipeWire
+        // remote: opening it on a closed session fails, and the
+        // fd would belong to a session the portal already ended.
+        if closed_signalled(&mut closed) {
+            return Err(WaylandError::Portal(format!(
+                "session {handle} was closed by the portal after start"
+            )));
+        }
         let count = streams.streams().len();
         let stream = streams.streams().first().ok_or(WaylandError::NoStream)?;
         let node_id = stream.pipe_wire_node_id();
