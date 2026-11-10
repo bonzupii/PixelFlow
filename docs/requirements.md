@@ -415,7 +415,8 @@ integrates worktree work onto `main`.
 | Workstream | Owner | Scope | State |
 | --- | --- | --- | --- |
 | Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Integrated and pushed at `c6accd0`; `ExecutionBackend` unified on the core contract type; contour header scrubbed |
-| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM); live-path/registry wiring pending (next: GPU-first workstream) |
+| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM) |
+| GPU live-path wiring | GPU wiring worker, worktree `~/workspace/pixelflow-gpu-wire`, branch `gpu/live-path` | Register `nearest-gpu` in the CLI registry; live `run` path resolves `nearest` to the GPU node with an adapter, reports the effective backend, errors loudly for explicit GPU requests with no adapter | Integrated and pushed at `aea977c`; full suite 213 passed / 0 failed; device run and live-path parity still unverified (no adapter on this VM) |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
 | Wayland backend-general | backend-general worker, worktree `~/workspace/pixelflow-wayland-general`, branch `wayland/backend-general` | Backend-general selection handling (wlr chooser at SelectSources, GNOME/KDE at Start); source-type verification (no silent target changes); monitor fallback per `CaptureConfig`; fresh sessions on retry; cancelled-Start diagnostic; mock scenarios | Integrated and pushed at `d3c4b41`; full suite 199 passed / 0 failed; live acceptance (real frames, Window and Monitor) still unverified |
@@ -523,8 +524,16 @@ In execution order (§11 of the owner directive):
 4. GPU processing with CPU retained — crate integrated at `c1c3a88`
    (WGSL nearest node, adapter fallback chain, no silent CPU
    fallback, `ExecutionBackend` unified on the core contract);
-   device run still required before any GPU claim. Live-path and
-   registry wiring of the GPU node is the next GPU workstream.
+   live-path and registry wiring done at `aea977c` (2026-11-10):
+   `nearest-gpu` registered (`NearestGpuAlgorithm`, GPU-only
+   descriptor, no device at registration); the live `run` path
+   resolves `nearest` to `nearest-gpu` when an adapter is present
+   and reports the effective backend, `nearest-gpu` with no
+   adapter errors loudly naming the CPU fallback id; `upscale
+   --algorithm nearest-gpu` with no adapter fails with
+   "cannot run on the cpu backend". Device run still required
+   before any GPU claim: no adapter on this VM, so GPU execution
+   and GPU/CPU parity through the live path are unverified.
 5. Wayland backend-general — done at `d3c4b41` (2026-11-10):
    source-type verification (`SourceMismatch`); monitor fallback
    per `CaptureConfig` (window failure → fresh monitor session,
