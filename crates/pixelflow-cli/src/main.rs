@@ -10,7 +10,7 @@ mod run;
 
 use clap::{Parser, Subcommand};
 use pixelflow_capture::SourceKind;
-use pixelflow_core::{ProcessError, Processor};
+use pixelflow_core::{Node, ProcessError, Processor};
 use pixelflow_processing::{Contour, Nearest};
 use std::process::ExitCode;
 
@@ -74,17 +74,35 @@ fn algorithm(name: &str) -> Result<Box<dyn Processor>, String> {
     }
 }
 
+/// The `PIXELFLOW_MEMORY_BUDGET` value in bytes, when it is set
+/// and parses as a plain integer. An unset or invalid value
+/// means no budget: any size the machine can allocate is
+/// attempted. The budget is a caller resource limit, not a
+/// product ceiling.
+fn memory_budget_from_env() -> Option<u64> {
+    std::env::var("PIXELFLOW_MEMORY_BUDGET")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
 /// Build the Contour processor, honouring `PIXELFLOW_MEMORY_BUDGET`
-/// (bytes, plain integer) when it is set. An unset or invalid value
-/// means no budget: any size the machine can allocate is attempted.
-/// The budget is a caller resource limit, not a product ceiling.
+/// when it is set.
 fn contour_from_env() -> Box<dyn Processor> {
-    match std::env::var("PIXELFLOW_MEMORY_BUDGET") {
-        Ok(text) => match text.trim().parse::<u64>() {
-            Ok(bytes) => Box::new(Contour::with_memory_budget(bytes)),
-            Err(_) => Box::new(Contour),
-        },
-        Err(_) => Box::new(Contour),
+    match memory_budget_from_env() {
+        Some(bytes) => Box::new(Contour::with_memory_budget(bytes)),
+        None => Box::new(Contour),
+    }
+}
+
+/// Build the Contour graph node for the live `run` path,
+/// honouring `PIXELFLOW_MEMORY_BUDGET` the same way
+/// `contour_from_env` does. The node declares the Global
+/// spatial dependency `Contour::node` states, so the graph
+/// runs it whole-frame.
+fn contour_node_from_env(scale: u32) -> Box<dyn Node> {
+    match memory_budget_from_env() {
+        Some(bytes) => Box::new(Contour::with_memory_budget(bytes).node(scale)),
+        None => Box::new(Contour::node(scale)),
     }
 }
 

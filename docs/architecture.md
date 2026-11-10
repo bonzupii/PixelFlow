@@ -149,7 +149,9 @@ the result back. Four commands:
   `--algorithm contour|nearest` (default contour).
 - `run <program> [args]`: launches the target, captures the
   source the user picks in the compositor dialog, processes
-  every frame with contour, presents it. `--capture
+  every frame through the processing graph (one contour node,
+  run whole-frame under its Global spatial dependency),
+  presents it. `--capture
   window|monitor` (default window), `--scale 2|4` (default 4),
   `--windowed` for a preview instead of fullscreen (fullscreen
   is the default; `--fullscreen` and `--windowed` conflict).

@@ -153,3 +153,24 @@ fn unsupported_scale_fails_through_the_graph() -> Result<(), String> {
     ));
     Ok(())
 }
+
+#[test]
+fn limited_contour_node_declares_global_and_matches_direct_output() -> Result<(), String> {
+    let frame = diagonal_frame()?;
+    let node = Contour::with_memory_budget(u64::MAX).node(2);
+    assert_eq!(node.name(), "contour");
+    assert_eq!(node.spatial_dependency(), SpatialDependency::Global);
+    let mut builder = GraphBuilder::new();
+    builder.add_input("in", PixelFormat::Rgb8);
+    builder.add_node("contour", Box::new(node));
+    builder.connect(Source::input("in"), "contour", "in");
+    builder.add_output("out", "contour", "out");
+    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let outputs = graph
+        .run(vec![("in", frame.clone())])
+        .map_err(|e| e.to_string())?;
+    assert_eq!(outputs.len(), 1);
+    let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
+    assert_eq!(outputs[0].1.data(), direct.data());
+    Ok(())
+}

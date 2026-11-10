@@ -2151,3 +2151,17 @@ impl Contour {
         ProcessorNode::new(Self, scale, SpatialDependency::Global)
     }
 }
+
+impl LimitedContour {
+    /// Wrap this algorithm as a graph node running at `scale`.
+    /// The node declares [`SpatialDependency::Global`] for the
+    /// same reason [`Contour::node`] does: the edge follower's
+    /// runs and gates span whole scanlines, so no small radius
+    /// bounds the input area one output pixel depends on. The
+    /// budget is the one this contour was built with, so the
+    /// node enforces it exactly as the processor does.
+    #[must_use]
+    pub fn node(self, scale: u32) -> ProcessorNode<Self> {
+        ProcessorNode::new(self, scale, SpatialDependency::Global)
+    }
+}

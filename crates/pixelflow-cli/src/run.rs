@@ -1,10 +1,11 @@
 //! The `run` command: launch the target, capture its window, run
-//! each frame through the processing pipeline, and present the result
+//! each frame through the processing graph, and present the result
 //! in a fullscreen window.
 //!
 //! The work splits across two threads. The processing thread owns the
-//! capture backend and the child process: it pulls frames, processes
-//! them, and publishes the newest to a replaceable frame slot. A
+//! capture backend, the child process, and the processing graph: it
+//! pulls frames, runs each through the graph's single contour node,
+//! and publishes the newest to a replaceable frame slot. A
 //! newer frame replaces one still waiting in the slot, so the
 //! presentation window always draws the freshest frame and latency
 //! never accumulates. The processing thread wakes the presentation
@@ -24,7 +25,7 @@
 
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
-use pixelflow_core::FrameSlot;
+use pixelflow_core::{Frame, FrameSlot, Graph, GraphBuilder, GraphError, PixelFormat, Source};
 use pixelflow_present::{PresentLoop, PresentUserEvent};
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
@@ -134,6 +135,51 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     }
 }
 
+/// Build the live processing graph: one Contour node fed by the
+/// graph input, exposing the node's output. The node declares
+/// the Global spatial dependency, so the graph runs it
+/// whole-frame; there is no tile-level incremental claim for
+/// it. Built fresh in the processing thread, which owns the
+/// graph exactly as it owns the capture backend and the child
+/// process.
+///
+/// # Errors
+///
+/// Returns [`GraphError`] when the fixed wiring fails to
+/// validate, which means a programming error in this function.
+fn build_contour_graph(scale: u32) -> Result<Graph, GraphError> {
+    let mut builder = GraphBuilder::new();
+    builder.add_input("in", PixelFormat::Rgb8);
+    builder.add_node("contour", crate::contour_node_from_env(scale));
+    builder.connect(Source::input("in"), "contour", "in");
+    builder.add_output("out", "contour", "out");
+    builder.build()
+}
+
+/// Run one captured frame through `graph` and return the
+/// processed frame. Ownership moves in and out with no frame
+/// cloned on either side: [`Graph::run`] takes the input frame
+/// by value, drops it once the node has consumed it, and
+/// returns the output frame by value. The incremental executor
+/// is deliberately not used here: with a single Global node it
+/// would diff the whole frame, retain the previous frame and a
+/// cached output, and clone the output, for output identical
+/// to this whole-frame run.
+///
+/// # Errors
+///
+/// Returns [`GraphError`] when the frame is not RGB8 or the
+/// contour node fails.
+fn process_frame(graph: &mut Graph, frame: Frame) -> Result<Frame, GraphError> {
+    let mut outputs = graph.run(vec![("in", frame)])?;
+    match outputs.pop() {
+        Some((_, frame)) => Ok(frame),
+        None => Err(GraphError::Internal(
+            "contour graph produced no output".to_string(),
+        )),
+    }
+}
+
 /// The processing thread: pull frames, process them, publish the
 /// newest to the presentation slot and wake the presentation loop.
 /// `wake` reports whether the loop is still alive: it sends the
@@ -148,32 +194,38 @@ fn run_processing(
     wake: impl Fn() -> bool,
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let processor = crate::contour_from_env();
     let mut result: Result<(), String> = Ok(());
-    while !exit.load(Ordering::Relaxed) {
-        match backend.capture_frame() {
-            Ok(Some(frame)) => match processor.process(&frame, scale) {
-                Ok(processed) => {
-                    slot.publish(processed);
-                    if !wake() {
+    match build_contour_graph(scale) {
+        Ok(mut graph) => {
+            while !exit.load(Ordering::Relaxed) {
+                match backend.capture_frame() {
+                    Ok(Some(frame)) => match process_frame(&mut graph, frame) {
+                        Ok(processed) => {
+                            slot.publish(processed);
+                            if !wake() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            result = Err(format!("processing failed: {e}"));
+                            break;
+                        }
+                    },
+                    Ok(None) => {
+                        if launcher.exited() {
+                            exit.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        result = Err(format!("capture failed: {e}"));
                         break;
                     }
                 }
-                Err(e) => {
-                    result = Err(format!("processing failed: {e}"));
-                    break;
-                }
-            },
-            Ok(None) => {
-                if launcher.exited() {
-                    exit.store(true, Ordering::Relaxed);
-                    break;
-                }
             }
-            Err(e) => {
-                result = Err(format!("capture failed: {e}"));
-                break;
-            }
+        }
+        Err(e) => {
+            result = Err(format!("processing graph failed to build: {e}"));
         }
     }
     exit.store(true, Ordering::Relaxed);
@@ -206,6 +258,8 @@ fn run_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixelflow_core::Processor;
+    use pixelflow_processing::Contour;
 
     #[test]
     fn unsupported_scale_fails_before_launching() {
@@ -237,5 +291,30 @@ mod tests {
             matches!(&result, Err(e) if e.contains("exited before capture started")),
             "the error names the early exit"
         );
+    }
+
+    #[test]
+    fn contour_graph_matches_direct_processor_output() -> Result<(), String> {
+        let mut data = Vec::with_capacity(4 * 4 * 3);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v: u8 = if x + y < 3 {
+                    20
+                } else if x + y < 5 {
+                    128
+                } else {
+                    240
+                };
+                data.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
+        let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let processed = process_frame(&mut graph, frame).map_err(|e| e.to_string())?;
+        assert_eq!((processed.width(), processed.height()), (8, 8));
+        assert_eq!(processed.format(), PixelFormat::Rgb8);
+        assert_eq!(processed.data(), direct.data());
+        Ok(())
     }
 }
