@@ -214,11 +214,11 @@ impl Node for BlendNode {
                 "blend inputs differ in size".to_string(),
             ));
         }
-        // Integer average without a widening cast: (x + y) / 2
-        // equals x/2 + y/2 + ((x % 2) + (y % 2)) / 2, all in u8.
+        // Integer average without a widening cast: `midpoint`
+        // divides the exact sum by two, with no overflow.
         let mut data = Vec::with_capacity(a.data().len());
         for (x, y) in a.data().iter().zip(b.data().iter()) {
-            data.push(x / 2 + y / 2 + (x % 2 + y % 2) / 2);
+            data.push(x.midpoint(*y));
         }
         let out = Frame::new(a.width(), a.height(), PixelFormat::Rgb8, data)
             .map_err(|e| ProcessError::Internal(e.to_string()))?
@@ -403,13 +403,19 @@ fn doubler_node() -> ProcessorNode<Doubler> {
 #[test]
 fn chain_runs_two_processors_and_propagates_metadata() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("first", Box::new(doubler_node()));
-    builder.add_node("second", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "first", "in");
-    builder.connect(Source::node("first", "out"), "second", "in");
-    builder.add_output("out", "second", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    // `build` takes the builder by value, so the chained
+    // `&mut Self` is moved out with `take`, not discarded.
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("first", Box::new(doubler_node()))
+            .add_node("second", Box::new(doubler_node()))
+            .connect(Source::input("in"), "first", "in")
+            .connect(Source::node("first", "out"), "second", "in")
+            .add_output("out", "second", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let frame = rgb_frame(2, 1, vec![1, 2, 3, 4, 5, 6])?.with_sequence(9);
     let outputs = graph.run(vec![("in", frame)]).map_err(|e| e.to_string())?;
     assert_eq!(outputs.len(), 1);
@@ -425,17 +431,21 @@ fn chain_runs_two_processors_and_propagates_metadata() -> Result<(), String> {
 #[test]
 fn branch_feeds_two_nodes_from_one_input() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node(
-        "copy",
-        Box::new(ProcessorNode::new(Identity, 2, SpatialDependency::Local)),
-    );
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "copy", "in");
-    builder.connect(Source::input("in"), "double", "in");
-    builder.add_output("plain", "copy", "out");
-    builder.add_output("big", "double", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node(
+                "copy",
+                Box::new(ProcessorNode::new(Identity, 2, SpatialDependency::Local)),
+            )
+            .add_node("double", Box::new(doubler_node()))
+            .connect(Source::input("in"), "copy", "in")
+            .connect(Source::input("in"), "double", "in")
+            .add_output("plain", "copy", "out")
+            .add_output("big", "double", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let frame = rgb_frame(2, 1, vec![1, 2, 3, 4, 5, 6])?;
     let outputs = graph.run(vec![("in", frame)]).map_err(|e| e.to_string())?;
     assert_eq!(outputs.len(), 2);
@@ -460,13 +470,17 @@ fn branch_feeds_two_nodes_from_one_input() -> Result<(), String> {
 #[test]
 fn two_input_node_blends_two_graph_inputs() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("red", PixelFormat::Rgb8);
-    builder.add_input("blue", PixelFormat::Rgb8);
-    builder.add_node("blend", Box::new(BlendNode));
-    builder.connect(Source::input("red"), "blend", "a");
-    builder.connect(Source::input("blue"), "blend", "b");
-    builder.add_output("out", "blend", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("red", PixelFormat::Rgb8)
+            .add_input("blue", PixelFormat::Rgb8)
+            .add_node("blend", Box::new(BlendNode))
+            .connect(Source::input("red"), "blend", "a")
+            .connect(Source::input("blue"), "blend", "b")
+            .add_output("out", "blend", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let red = rgb_frame(1, 1, vec![200, 0, 0])?;
     let blue = rgb_frame(1, 1, vec![0, 0, 200])?;
     let outputs = graph
@@ -480,16 +494,20 @@ fn two_input_node_blends_two_graph_inputs() -> Result<(), String> {
 #[test]
 fn two_input_node_blends_two_branches() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("left", Box::new(doubler_node()));
-    builder.add_node("right", Box::new(doubler_node()));
-    builder.add_node("blend", Box::new(BlendNode));
-    builder.connect(Source::input("in"), "left", "in");
-    builder.connect(Source::input("in"), "right", "in");
-    builder.connect(Source::node("left", "out"), "blend", "a");
-    builder.connect(Source::node("right", "out"), "blend", "b");
-    builder.add_output("out", "blend", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("left", Box::new(doubler_node()))
+            .add_node("right", Box::new(doubler_node()))
+            .add_node("blend", Box::new(BlendNode))
+            .connect(Source::input("in"), "left", "in")
+            .connect(Source::input("in"), "right", "in")
+            .connect(Source::node("left", "out"), "blend", "a")
+            .connect(Source::node("right", "out"), "blend", "b")
+            .add_output("out", "blend", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let frame = rgb_frame(1, 1, vec![10, 20, 30])?;
     let outputs = graph.run(vec![("in", frame)]).map_err(|e| e.to_string())?;
     // Both branches doubled the same frame, so blending them
@@ -504,18 +522,22 @@ fn two_input_node_blends_two_branches() -> Result<(), String> {
 #[test]
 fn executor_packs_strided_input_for_tight_only_node() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node(
-        "tight",
-        Box::new(ProcessorNode::new(
-            TightDoubler,
-            2,
-            SpatialDependency::Local,
-        )),
-    );
-    builder.connect(Source::input("in"), "tight", "in");
-    builder.add_output("out", "tight", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node(
+                "tight",
+                Box::new(ProcessorNode::new(
+                    TightDoubler,
+                    2,
+                    SpatialDependency::Local,
+                )),
+            )
+            .connect(Source::input("in"), "tight", "in")
+            .add_output("out", "tight", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let tight = rgb_frame(2, 1, vec![1, 2, 3, 4, 5, 6])?;
     let strided = Frame::new_with_stride(2, 1, PixelFormat::Rgb8, 8, vec![1, 2, 3, 4, 5, 6, 0, 0])
         .map_err(|e| e.to_string())?;
@@ -545,12 +567,16 @@ fn declarations_are_visible_on_processor_nodes() {
 #[test]
 fn build_rejects_mismatched_format() {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Gray8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "double", "in");
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Gray8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::MismatchedFormat {
             from: "in".to_string(),
             from_port: String::new(),
@@ -565,14 +591,18 @@ fn build_rejects_mismatched_format() {
 #[test]
 fn build_rejects_gray_producer_feeding_rgb_node() {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("gray", Box::new(GrayNode));
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "gray", "in");
-    builder.connect(Source::node("gray", "out"), "double", "in");
-    builder.add_output("out", "double", "out");
     assert!(matches!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("gray", Box::new(GrayNode))
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "gray", "in")
+                .connect(Source::node("gray", "out"), "double", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::MismatchedFormat { .. })
     ));
 }
@@ -586,14 +616,18 @@ fn build_rejects_cycle() {
     // port that already had an edge, which is an
     // InputAlreadyConnected error, not a cycle.
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("first", Box::new(BlendNode));
-    builder.add_node("second", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "first", "a");
-    builder.connect(Source::node("second", "out"), "first", "b");
-    builder.connect(Source::node("first", "out"), "second", "in");
-    builder.add_output("out", "second", "out");
-    let result = builder.build().map(|_| ());
+    let result = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("first", Box::new(BlendNode))
+            .add_node("second", Box::new(doubler_node()))
+            .connect(Source::input("in"), "first", "a")
+            .connect(Source::node("second", "out"), "first", "b")
+            .connect(Source::node("first", "out"), "second", "in")
+            .add_output("out", "second", "out"),
+    )
+    .build()
+    .map(|_| ());
     assert!(
         matches!(&result, Err(GraphError::Cycle(nodes))
             if nodes.contains(&"first".to_string())
@@ -605,11 +639,15 @@ fn build_rejects_cycle() {
 #[test]
 fn build_rejects_unconnected_input() {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::InputUnconnected {
             node: "double".to_string(),
             port: "in".to_string(),
@@ -620,13 +658,17 @@ fn build_rejects_unconnected_input() {
 #[test]
 fn build_rejects_twice_connected_input() {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "double", "in");
-    builder.connect(Source::input("in"), "double", "in");
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .connect(Source::input("in"), "double", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::InputAlreadyConnected {
             node: "double".to_string(),
             port: "in".to_string(),
@@ -637,33 +679,45 @@ fn build_rejects_twice_connected_input() {
 #[test]
 fn build_rejects_duplicate_node_and_unknown_names() {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "double", "in");
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::DuplicateNode("double".to_string()))
     );
 
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "ghost", "in");
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "ghost", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::UnknownNode("ghost".to_string()))
     );
 
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("double", Box::new(doubler_node()));
-    builder.connect(Source::input("in"), "double", "sideways");
-    builder.add_output("out", "double", "out");
     assert_eq!(
-        builder.build().map(|_| ()),
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "sideways")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
         Err(GraphError::UnknownPort {
             node: "double".to_string(),
             port: "sideways".to_string(),
@@ -675,11 +729,15 @@ fn build_rejects_duplicate_node_and_unknown_names() {
 fn run_rejects_missing_unexpected_and_duplicate_inputs() -> Result<(), String> {
     let build = || {
         let mut builder = GraphBuilder::new();
-        builder.add_input("in", PixelFormat::Rgb8);
-        builder.add_node("double", Box::new(doubler_node()));
-        builder.connect(Source::input("in"), "double", "in");
-        builder.add_output("out", "double", "out");
-        builder.build().map_err(|e| e.to_string())
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map_err(|e| e.to_string())
     };
     let frame = rgb_frame(1, 1, vec![1, 2, 3])?;
     let mut graph = build()?;
@@ -717,11 +775,15 @@ fn run_rejects_missing_unexpected_and_duplicate_inputs() -> Result<(), String> {
 #[test]
 fn failing_node_fails_the_run_with_its_name() -> Result<(), String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("fail", Box::new(FailNode));
-    builder.connect(Source::input("in"), "fail", "in");
-    builder.add_output("out", "fail", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("fail", Box::new(FailNode))
+            .connect(Source::input("in"), "fail", "in")
+            .add_output("out", "fail", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let frame = rgb_frame(1, 1, vec![1, 2, 3])?;
     let result = graph.run(vec![("in", frame)]);
     assert!(matches!(
@@ -735,11 +797,15 @@ fn failing_node_fails_the_run_with_its_name() -> Result<(), String> {
 fn misbehaving_nodes_are_rejected() -> Result<(), String> {
     for mode in [0u8, 1, 2] {
         let mut builder = GraphBuilder::new();
-        builder.add_input("in", PixelFormat::Rgb8);
-        builder.add_node("bad", Box::new(MisbehavingNode { mode }));
-        builder.connect(Source::input("in"), "bad", "in");
-        builder.add_output("out", "bad", "out");
-        let mut graph = builder.build().map_err(|e| e.to_string())?;
+        let mut graph = std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("bad", Box::new(MisbehavingNode { mode }))
+                .connect(Source::input("in"), "bad", "in")
+                .add_output("out", "bad", "out"),
+        )
+        .build()
+        .map_err(|e| e.to_string())?;
         let frame = rgb_frame(1, 1, vec![1, 2, 3])?;
         let result = graph.run(vec![("in", frame)]).map(|_| ());
         match mode {
@@ -773,14 +839,18 @@ fn misbehaving_nodes_are_rejected() -> Result<(), String> {
 /// spatial dependency, for the incremental tests.
 fn incremental_graph(dependency: SpatialDependency) -> Result<Graph, String> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node(
-        "double",
-        Box::new(ProcessorNode::new(Doubler, 2, dependency)),
-    );
-    builder.connect(Source::input("in"), "double", "in");
-    builder.add_output("out", "double", "out");
-    builder.build().map_err(|e| e.to_string())
+    std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node(
+                "double",
+                Box::new(ProcessorNode::new(Doubler, 2, dependency)),
+            )
+            .connect(Source::input("in"), "double", "in")
+            .add_output("out", "double", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())
 }
 
 /// A frame whose pixels vary by position, so a changed pixel is
@@ -790,7 +860,7 @@ fn pattern_frame(width: u32, height: u32) -> Result<Frame, String> {
     for y in 0..height {
         for x in 0..width {
             let v = ((x * 7 + y * 13) % 251) as u8;
-            data.extend_from_slice(&[v, (v / 2) as u8, (255 - v) as u8]);
+            data.extend_from_slice(&[v, v / 2, 255 - v]);
         }
     }
     rgb_frame(width, height, data)
