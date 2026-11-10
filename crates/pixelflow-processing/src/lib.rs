@@ -7,6 +7,13 @@
 
 pub mod algorithms;
 pub mod region_analysis;
+pub mod registry;
 
-pub use algorithms::contour::{Contour, LimitedContour};
-pub use algorithms::nearest::Nearest;
+pub use algorithms::bilinear::{Bilinear, BilinearAlgorithm};
+pub use algorithms::contour::{Contour, ContourAlgorithm, LimitedContour};
+pub use algorithms::nearest::{Nearest, NearestAlgorithm};
+pub use pixelflow_core::{
+    AlgorithmConfig, AlgorithmDescriptor, AlgorithmError, AlgorithmFactory, AlgorithmOrigin,
+    ConfigValue, ExecutionBackend, ParameterDescriptor, ParameterKind,
+};
+pub use registry::AlgorithmRegistry;

@@ -4,7 +4,10 @@
 //! other algorithm is judged against.
 
 use pixelflow_core::graph::{ProcessorNode, SpatialDependency};
-use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
+use pixelflow_core::{
+    AlgorithmConfig, AlgorithmDescriptor, AlgorithmError, AlgorithmFactory, AlgorithmOrigin, Frame,
+    PixelFormat, ProcessError, Processor,
+};
 
 /// Nearest-neighbour upscaling.
 pub struct Nearest;
@@ -12,6 +15,18 @@ pub struct Nearest;
 impl Processor for Nearest {
     fn name(&self) -> &'static str {
         "nearest"
+    }
+
+    fn description(&self) -> &'static str {
+        "nearest-neighbour baseline: each source pixel becomes a scale by scale block of identical pixels"
+    }
+
+    fn spatial_dependency(&self) -> SpatialDependency {
+        SpatialDependency::Local
+    }
+
+    fn working_bytes_per_output_pixel(&self) -> Option<u64> {
+        Some(3)
     }
 
     fn supported_scales(&self) -> &[u32] {
@@ -74,6 +89,24 @@ impl Nearest {
     #[must_use]
     pub fn node(scale: u32) -> ProcessorNode<Self> {
         ProcessorNode::new(Self, scale, SpatialDependency::Local)
+    }
+}
+
+/// The registry entry for Nearest: a built-in, CPU-only,
+/// single-stage algorithm with no parameters.
+pub struct NearestAlgorithm;
+
+impl AlgorithmFactory for NearestAlgorithm {
+    fn descriptor(&self) -> AlgorithmDescriptor {
+        let mut descriptor =
+            AlgorithmDescriptor::from_processor(&Nearest, AlgorithmOrigin::BuiltIn);
+        descriptor.display_name = "Nearest";
+        descriptor
+    }
+
+    fn create(&self, config: &AlgorithmConfig) -> Result<Box<dyn Processor>, AlgorithmError> {
+        Nearest.validate_config(config)?;
+        Ok(Box::new(Nearest))
     }
 }
 

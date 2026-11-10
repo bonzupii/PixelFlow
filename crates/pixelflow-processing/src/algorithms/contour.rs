@@ -29,7 +29,24 @@
 //! prints each accepted run to stderr.
 
 use pixelflow_core::graph::{ProcessorNode, SpatialDependency};
-use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor, StrideSupport};
+use pixelflow_core::{
+    AlgorithmConfig, AlgorithmDescriptor, AlgorithmError, AlgorithmFactory, AlgorithmOrigin,
+    ConfigValue, Frame, ParameterDescriptor, ParameterKind, PixelFormat, ProcessError, Processor,
+    StrideSupport,
+};
+
+/// The algorithm-specific parameters Contour accepts: one
+/// optional working-memory budget, in bytes. Zero means no
+/// budget: any size the machine can allocate is attempted.
+static CONTOUR_PARAMETERS: &[ParameterDescriptor] = &[ParameterDescriptor {
+    name: "memory_budget_bytes",
+    description: "working-memory budget in bytes; 0 means no budget",
+    kind: ParameterKind::Integer {
+        min: 0,
+        max: i64::MAX,
+    },
+    default: ConfigValue::Integer(0),
+}];
 
 // ---------------------------------------------------------------- images
 #[derive(Clone)]
@@ -2102,6 +2119,18 @@ impl Processor for Contour {
         "contour"
     }
 
+    fn description(&self) -> &'static str {
+        "gated merge, adaptive labelset, edge follower"
+    }
+
+    fn spatial_dependency(&self) -> SpatialDependency {
+        SpatialDependency::Global
+    }
+
+    fn parameters(&self) -> &[ParameterDescriptor] {
+        CONTOUR_PARAMETERS
+    }
+
     fn supported_scales(&self) -> &[u32] {
         &[2, 4]
     }
@@ -2122,6 +2151,18 @@ impl Processor for Contour {
 impl Processor for LimitedContour {
     fn name(&self) -> &'static str {
         "contour"
+    }
+
+    fn description(&self) -> &'static str {
+        "gated merge, adaptive labelset, edge follower"
+    }
+
+    fn spatial_dependency(&self) -> SpatialDependency {
+        SpatialDependency::Global
+    }
+
+    fn parameters(&self) -> &[ParameterDescriptor] {
+        CONTOUR_PARAMETERS
     }
 
     fn supported_scales(&self) -> &[u32] {
@@ -2163,5 +2204,38 @@ impl LimitedContour {
     #[must_use]
     pub fn node(self, scale: u32) -> ProcessorNode<Self> {
         ProcessorNode::new(self, scale, SpatialDependency::Global)
+    }
+}
+
+/// The registry entry for Contour: a built-in, CPU-only,
+/// single-stage algorithm. The `memory_budget_bytes`
+/// parameter, when positive, builds a [`LimitedContour`] that
+/// enforces the budget; zero or absent builds an unlimited
+/// [`Contour`].
+pub struct ContourAlgorithm;
+
+impl AlgorithmFactory for ContourAlgorithm {
+    fn descriptor(&self) -> AlgorithmDescriptor {
+        let mut descriptor =
+            AlgorithmDescriptor::from_processor(&Contour, AlgorithmOrigin::BuiltIn);
+        descriptor.display_name = "Contour";
+        descriptor
+    }
+
+    fn create(&self, config: &AlgorithmConfig) -> Result<Box<dyn Processor>, AlgorithmError> {
+        Contour.validate_config(config)?;
+        match config.integer("memory_budget_bytes") {
+            Some(budget) if budget > 0 => {
+                let Ok(budget) = u64::try_from(budget) else {
+                    return Err(AlgorithmError::InvalidConfig {
+                        algorithm: "contour",
+                        parameter: "memory_budget_bytes".to_string(),
+                        message: "budget exceeds the u64 range".to_string(),
+                    });
+                };
+                Ok(Box::new(Contour::with_memory_budget(budget)))
+            }
+            _ => Ok(Box::new(Contour)),
+        }
     }
 }
