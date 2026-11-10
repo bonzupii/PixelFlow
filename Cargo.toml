@@ -24,8 +24,10 @@ pixelflow-present = { path = "crates/pixelflow-present" }
 clap = { version = "4", features = ["derive"] }
 png = "0.18"
 ashpd = { version = "0.14", features = ["screencast", "pipewire"] }
-pipewire = "0.10"
-tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
+pipewire = { version = "0.10", features = ["v0_3_44"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+futures-util = "0.3"
+zbus = "6"
 wgpu = "30"
 winit = "0.30"
 pollster = "0.4"

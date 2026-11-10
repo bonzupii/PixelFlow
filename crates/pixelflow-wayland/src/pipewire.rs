@@ -92,9 +92,13 @@ struct StreamData {
 /// in the shared error slot; the buffer itself is released by its Drop.
 fn handle_buffer(mut buffer: pw::buffer::Buffer, data: &mut StreamData) {
     let Some(format) = data.format else {
+        // A buffer arrived before the format was negotiated; it
+        // cannot be converted, so it is dropped and counted.
+        data.shared.dropped.fetch_add(1, Ordering::Relaxed);
         return;
     };
     let Some((width, height)) = data.size else {
+        data.shared.dropped.fetch_add(1, Ordering::Relaxed);
         return;
     };
     let datas = buffer.datas_mut();
@@ -196,10 +200,36 @@ fn build_format_params() -> Result<Vec<u8>, WaylandError> {
 struct LoopSetup {
     stop: Arc<AtomicBool>,
     fd: OwnedFd,
-    node_id: u32,
+    target: StreamTarget,
     shared: Arc<Shared>,
     slot: Arc<FrameSlot>,
     ready: mpsc::Sender<Result<(), WaylandError>>,
+}
+
+/// How the `PipeWire` stream finds the portal stream to connect to.
+/// The portal reports the serial since interface version 6, and the
+/// specification deprecates node-id targeting because node ids can
+/// be reused after node destruction. The serial is a monotonically
+/// increasing 64-bit identifier that is never reused, so it is
+/// preferred whenever the portal reports one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamTarget {
+    /// Connect by `PipeWire` object serial, via `PW_KEY_TARGET_OBJECT`.
+    Serial(u64),
+    /// Connect by node id, for portals that report no serial.
+    Node(u32),
+}
+
+impl StreamTarget {
+    /// Prefer the serial the portal reported; fall back to the node
+    /// id when the portal is older than version 6 or reports none.
+    #[must_use]
+    pub fn from_portal(serial: Option<u64>, node_id: u32) -> StreamTarget {
+        match serial {
+            Some(serial) => StreamTarget::Serial(serial),
+            None => StreamTarget::Node(node_id),
+        }
+    }
 }
 
 /// Build the context, core, and stream on the portal fd, report
@@ -214,16 +244,29 @@ fn run_loop_inner(setup: LoopSetup) -> Result<(), WaylandError> {
     let core = context
         .connect_fd(setup.fd, None)
         .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
-    let stream = StreamBox::new(
-        &core,
-        "pixelflow-capture",
-        pw::properties::properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Screen",
-        },
-    )
-    .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
+    let mut properties = pw::properties::properties! {
+        *pw::keys::MEDIA_TYPE => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Screen",
+    };
+    // Serial targeting goes through the target.object property and
+    // an unspecified connect id, so PipeWire resolves the serial
+    // itself; node-id targeting passes the id to connect directly.
+    let target_id = match setup.target {
+        StreamTarget::Serial(serial) => {
+            properties.insert(*pw::keys::TARGET_OBJECT, serial.to_string());
+            eprintln!("pixelflow: pipewire: connecting by stream serial {serial}");
+            None
+        }
+        StreamTarget::Node(node_id) => {
+            eprintln!(
+                "pixelflow: pipewire: connecting by node id {node_id} (portal gave no serial)"
+            );
+            Some(node_id)
+        }
+    };
+    let stream = StreamBox::new(&core, "pixelflow-capture", properties)
+        .map_err(|e| WaylandError::PipeWire(e.to_string()))?;
     let data = StreamData {
         shared: setup.shared.clone(),
         slot: setup.slot,
@@ -284,7 +327,7 @@ fn run_loop_inner(setup: LoopSetup) -> Result<(), WaylandError> {
     stream
         .connect(
             Direction::Input,
-            Some(setup.node_id),
+            target_id,
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut params,
         )
@@ -366,14 +409,16 @@ pub struct PipeWireCapture {
 impl PipeWireCapture {
     /// Connect to the portal's `PipeWire` remote and start the stream.
     /// Blocks briefly while the stream negotiates; the main loop keeps
-    /// running on its own thread after this returns.
+    /// running on its own thread after this returns. The target
+    /// selects serial targeting when the portal reported a serial,
+    /// node-id targeting otherwise.
     ///
     /// # Errors
     ///
     /// Returns `PipeWire` when the remote, the context, the stream,
     /// or the format negotiation fails, and when the loop thread does
     /// not report readiness within ten seconds.
-    pub fn start(fd: OwnedFd, node_id: u32) -> Result<PipeWireCapture, WaylandError> {
+    pub fn start(fd: OwnedFd, target: StreamTarget) -> Result<PipeWireCapture, WaylandError> {
         let stop = Arc::new(AtomicBool::new(false));
         let slot = Arc::new(FrameSlot::new());
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), WaylandError>>();
@@ -381,7 +426,7 @@ impl PipeWireCapture {
         let setup = LoopSetup {
             stop: stop.clone(),
             fd,
-            node_id,
+            target,
             shared: shared.clone(),
             slot: slot.clone(),
             ready: ready_tx,
@@ -487,11 +532,40 @@ mod tests {
     use std::os::fd::OwnedFd;
 
     #[test]
+    fn stream_target_prefers_the_serial() {
+        assert_eq!(
+            StreamTarget::from_portal(Some(987_654_321), 42),
+            StreamTarget::Serial(987_654_321)
+        );
+    }
+
+    #[test]
+    fn stream_target_falls_back_to_the_node_id() {
+        assert_eq!(StreamTarget::from_portal(None, 42), StreamTarget::Node(42));
+    }
+
+    #[test]
     fn start_with_a_non_pipewire_fd_is_an_error_not_a_panic()
     -> Result<(), Box<dyn std::error::Error>> {
         let file = File::open("/dev/null")?;
         let fd = OwnedFd::from(file);
-        let result = PipeWireCapture::start(fd, 42);
+        let result = PipeWireCapture::start(fd, StreamTarget::Node(42));
+        assert!(result.is_err(), "expected failure connecting to /dev/null");
+        if let Err(e) = result {
+            assert!(
+                matches!(e, WaylandError::PipeWire(_)),
+                "expected a PipeWire error, got {e}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn start_by_serial_with_a_non_pipewire_fd_is_an_error_not_a_panic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = File::open("/dev/null")?;
+        let fd = OwnedFd::from(file);
+        let result = PipeWireCapture::start(fd, StreamTarget::Serial(987_654_321));
         assert!(result.is_err(), "expected failure connecting to /dev/null");
         if let Err(e) = result {
             assert!(

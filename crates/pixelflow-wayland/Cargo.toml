@@ -10,6 +10,10 @@ pixelflow-capture = { workspace = true }
 ashpd = { workspace = true }
 pipewire = { workspace = true }
 tokio = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+zbus = { workspace = true }
 
 [lints]
 workspace = true

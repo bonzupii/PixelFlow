@@ -1,7 +1,7 @@
 //! The Wayland capture backend: a portal session plus a `PipeWire`
 //! stream, behind the pixelflow-capture trait.
 
-use crate::pipewire::PipeWireCapture;
+use crate::pipewire::{PipeWireCapture, StreamTarget};
 use crate::{PortalSession, WaylandError};
 use pixelflow_capture::{CaptureBackend, CaptureConfig, CaptureError};
 use pixelflow_core::Frame;
@@ -54,7 +54,8 @@ impl CaptureBackend for WaylandCapture {
             ));
         };
         let node_id = portal.node_id;
-        let pipewire = match PipeWireCapture::start(fd, node_id) {
+        let target = StreamTarget::from_portal(portal.serial, node_id);
+        let pipewire = match PipeWireCapture::start(fd, target) {
             Ok(pipewire) => pipewire,
             Err(start_failure) => {
                 return Err(match portal.close() {
