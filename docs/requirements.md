@@ -40,13 +40,13 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `e8b475f`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `91bf243`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
-| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
+| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`, `Scale2x`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
 | `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); wired into the live path and the algorithm registry at `aea977c` (`nearest-gpu` registered; live `run` resolves `nearest` to the GPU node when an adapter is present); device run unverified — no adapter on this VM |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
@@ -620,6 +620,19 @@ Contour product algorithm; do not confuse the two.
   lanczos3 worktree sources at `e8b475f`, which the owner had
   already fast-forwarded onto main and pushed before the run
   finished; the tree content is identical.
+  Baseline at `91bf243` verified by the coordinator run (release,
+  2026-11-10, `cargo build --release` exit 0, `cargo fmt --check`
+  exit 0, `ci/clippy-gate.sh` exit 0 with 30 known diagnostics
+  and 0 elsewhere, `cargo test --release --workspace` under
+  `dbus-run-session` with `PIXELFLOW_FIXTURES_DIR` set, exit 0):
+  292 passed / 0 failed. Oracle bit-identical per the
+  coordinator's own comparison run
+  (`cg-scale2x-verify2-oracle.log`, reference outputs
+  regenerated from the verbatim reference file). Raw logs:
+  `goals/pixelflow/hidden_files/cg-scale2x-verify3-fmt.log`,
+  `cg-scale2x-verify3-build-release.log`,
+  `cg-scale2x-verify3-clippy.log`,
+  `cg-scale2x-verify3-suite-release.log`.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -782,6 +795,11 @@ a documented blocker.
   bit-identical oracle, flat shift 0, release suite 280 passed /
   0 failed. Owner-authored, on main; the driver run verified the
   gate independently (see §8).
+- `91bf243`, Scale2x: port the reference stage as a stage
+  algorithm (AdvMAME2x, native factor 2, 4x as two 2x passes), id
+  `scale2x`, scales 2/4, bit-identical oracle, flat shift 0,
+  release suite 292 passed / 0 failed, gate verified
+  independently by the coordinator run (see §8).
 
 ## 12. Remaining work and acceptance criteria
 
@@ -797,7 +815,8 @@ In execution order (§11 of the owner directive):
    release, commit-recorded), at `134a052` (267, release, tally
    from the owner's suite log), at `e8b475f` (280, release,
    fixtures exercised, gate verified independently by the driver
-   run).
+   run), at `91bf243` (292, release, fixtures exercised, gate
+   verified independently by the coordinator run).
 2. Wayland verification report, done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
@@ -883,11 +902,12 @@ In execution order (§11 of the owner directive):
    oracle, release suite 267 passed / 0 failed, tally read from
    the owner's suite log `cg-bicubic-suite-release.log`);
    lanczos3 ported at `e8b475f` (bit-identical oracle, release
-   suite 280 passed / 0 failed). Nearest and bilinear are the
-   repo's existing implementations, not reference ports. Next in
-   order: scale2x; the owner is porting in sequence in `port/*`
-   worktrees (`port/scale2x` exists), so the driver spawns no port
-   worker. The "queued behind the CI fix" line is superseded: the
+   suite 280 passed / 0 failed); scale2x ported at `91bf243`
+   (bit-identical oracle, release suite 292 passed / 0 failed).
+   Nearest and bilinear are the repo's existing implementations,
+   not reference ports. Next in order: epx; the owner is porting
+   in sequence in `port/*` worktrees (`port/scale2x` exists), so
+   the driver spawns no port worker. The "queued behind the CI fix" line is superseded: the
    ports landed on main with no separate CI-fix commit.
 10. Operation-level composition (owner direction, 2026-11-10;
     queued behind the scaler ports). This restores and extends
