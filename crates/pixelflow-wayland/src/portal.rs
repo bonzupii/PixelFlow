@@ -186,6 +186,26 @@ fn portal_error(context: &str, error: &ashpd::Error) -> WaylandError {
     WaylandError::Portal(format!("{context}: {}", format_ashpd_error(error)))
 }
 
+/// Whether a failed session close means the portal already
+/// destroyed the session object. The portal tears the session
+/// down when a request is cancelled, so closing it then answers
+/// `UnknownMethod` or `UnknownObject` for a path that no longer
+/// exists. That is expected cleanup, not a second failure, so
+/// the caller logs it as such and still reports the original
+/// failure. The message check is the fallback for a portal that
+/// reports the same condition under another error name.
+fn session_already_gone(error: &ashpd::Error) -> bool {
+    if let ashpd::Error::Portal(ashpd::PortalError::ZBus(ashpd::zbus::Error::FDO(inner))) = error
+        && matches!(
+            inner.as_ref(),
+            ashpd::zbus::fdo::Error::UnknownMethod(_) | ashpd::zbus::fdo::Error::UnknownObject(_)
+        )
+    {
+        return true;
+    }
+    format_ashpd_error(error).contains("does not exist at path")
+}
+
 impl PortalSession {
     /// Create a session, request the source kind, and start the
     /// capture. Blocks until the user answers the compositor dialog
@@ -287,10 +307,18 @@ impl PortalSession {
                     Ok(()) => eprintln!(
                         "pixelflow: portal: session {handle} closed after failure: {error}"
                     ),
-                    Err(close_error) => eprintln!(
-                        "pixelflow: portal: session {handle} close after failure also failed: {}; original failure: {error}",
-                        format_ashpd_error(&close_error)
-                    ),
+                    Err(close_error) => {
+                        if session_already_gone(&close_error) {
+                            eprintln!(
+                                "pixelflow: portal: session {handle} already closed by the portal; original failure: {error}"
+                            );
+                        } else {
+                            eprintln!(
+                                "pixelflow: portal: session {handle} close after failure also failed: {}; original failure: {error}",
+                                format_ashpd_error(&close_error)
+                            );
+                        }
+                    }
                 }
                 Err(error)
             }
@@ -339,10 +367,24 @@ impl PortalSession {
         // and the answer is stored in the request: it must be read.
         // Dropping the request unread swallows a refused or
         // cancelled selection, and the following Start then fails on
-        // a session the portal already closed.
-        selection
-            .response()
-            .map_err(|e| portal_error("select sources response", &e))?;
+        // a session the portal already closed. A cancellation is
+        // portal-side: the source picker dialog was dismissed, or
+        // the compositor backend cancelled the request. The code
+        // cannot tell which, so the error says both and asserts
+        // neither.
+        selection.response().map_err(|e| {
+            if matches!(
+                e,
+                ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
+            ) {
+                WaylandError::Portal(format!(
+                    "select sources response: {}; the source picker dialog was dismissed, or the compositor backend cancelled the request",
+                    format_ashpd_error(&e)
+                ))
+            } else {
+                portal_error("select sources response", &e)
+            }
+        })?;
         eprintln!("pixelflow: portal: session {handle}: source selection complete");
         if closed_signalled(&mut closed) {
             return Err(WaylandError::Portal(format!(
@@ -532,5 +574,50 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("start session"), "text: {text}");
         assert!(text.contains("NotFound"), "text: {text}");
+    }
+
+    fn fdo_portal_error(error: ashpd::zbus::fdo::Error) -> ashpd::Error {
+        ashpd::Error::Portal(ashpd::PortalError::ZBus(ashpd::zbus::Error::FDO(Box::new(
+            error,
+        ))))
+    }
+
+    #[test]
+    fn session_already_gone_true_for_unknown_method() {
+        // The exact close error from the owner's log: the portal
+        // destroyed the session object when the selection was
+        // cancelled, so Close answers UnknownMethod for the path.
+        let error = fdo_portal_error(ashpd::zbus::fdo::Error::UnknownMethod(
+            "Object does not exist at path \"/org/freedesktop/portal/desktop/session/1_1611/ashpd_AgVQbTYZWC\""
+                .to_string(),
+        ));
+        assert!(session_already_gone(&error));
+    }
+
+    #[test]
+    fn session_already_gone_true_for_unknown_object() {
+        let error = fdo_portal_error(ashpd::zbus::fdo::Error::UnknownObject(
+            "Object does not exist at path \"/org/freedesktop/portal/desktop/session/1_1611/ashpd_AgVQbTYZWC\""
+                .to_string(),
+        ));
+        assert!(session_already_gone(&error));
+    }
+
+    #[test]
+    fn session_already_gone_true_for_the_message_alone() {
+        let error =
+            ashpd::Error::Portal(ashpd::PortalError::Failed(
+                "Object does not exist at path \"/org/freedesktop/portal/desktop/session/1_1611/ashpd_AgVQbTYZWC\""
+                    .to_string(),
+            ));
+        assert!(session_already_gone(&error));
+    }
+
+    #[test]
+    fn session_already_gone_false_for_service_unknown() {
+        let error = fdo_portal_error(ashpd::zbus::fdo::Error::ServiceUnknown(
+            "the portal service is missing".to_string(),
+        ));
+        assert!(!session_already_gone(&error));
     }
 }
