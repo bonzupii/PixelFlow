@@ -294,30 +294,32 @@ Contour product algorithm; do not confuse the two.
   selection is still a terminal failure for that run until the
   backend-general retry/fallback work lands (see below).
 - Backend-general gaps (verified against the code at `ffff504`;
-  workstream: backend-general Wayland, not started): (1) The
-  selected source type is logged (`portal.rs` prints
-  `stream.source_type()`) but never verified against the requested
-  `SourceKind` — a portal returning a monitor stream for a window
-  request (or the reverse) is silently accepted. (2) No monitor
-  fallback exists: `run.rs` makes one `initialize` attempt and
-  fails the run, although the `CaptureConfig` contract states
-  "monitor is the fallback when window capture is unavailable".
-  (3) No retry exists: a cancelled selection ends the run; a retry
-  must open a fresh portal session (a cancelled session's handle
-  is dead). `WaylandCapture::initialize` leaves the backend
-  uninitialized on every failure path (the portal is closed
-  before returning `Err`), so a second `initialize` call on the
-  same backend opens a fresh session — the structure supports
-  fallback, but no caller does it. (4) No cancelled-Start
-  diagnostic: GNOME/KDE show their chooser at Start, so a
-  chooser dismissal there needs the same factual treatment as the
-  cancelled-selection diagnostic. (5) Gap 3 from verification
-  stands: ashpd 0.14 parses only the `pipewire_serial`
-  (underscore) key while the portal specification wires
-  `pipewire-serial` (hyphen), so node-id fallback is the live
-  path; fixing it needs a raw D-Bus Start call bypassing ashpd's
-  typed `Request<Streams>`, which was judged not small and left
-  as is.
+  fixed and integrated at `d3c4b41`, 2026-11-10): (1) Source-type
+  verification: `verify_stream_source` in `portal.rs` fails the
+  open with `WaylandError::SourceMismatch` naming requested vs
+  actual when the portal returns a stream of another kind; an
+  unmapped type fails as a `Portal` error naming the raw type.
+  (2) Monitor fallback: `run.rs` `initialize_capture` tries
+  monitor once on the same backend when window initialize fails,
+  eprintlns both the failure and the fallback, and reports the
+  effective source (`pixelflow: capturing {effective_source}`);
+  both failures named when both fail. (3) Fresh sessions on
+  retry: the fallback reuses the same backend, and a failed
+  `initialize` leaves it uninitialized (verified by unit test
+  `failed_initialize_leaves_the_backend_reusable`), so the
+  monitor attempt opens a fresh session; the mock asserts a
+  different session path for the second attempt. (4)
+  Cancelled-Start diagnostic: `start_response_error` gives a
+  cancelled Start the same factual treatment as cancelled
+  SelectSources. (5) Gap 3 from verification stands: ashpd 0.14
+  parses only the `pipewire_serial` (underscore) key while the
+  portal specification wires `pipewire-serial` (hyphen), so
+  node-id fallback is the live path; fixing it needs a raw D-Bus
+  Start call bypassing ashpd's typed `Request<Streams>`, which
+  was judged not small and left as is. Full suite 199 passed /
+  0 failed at `d3c4b41` (baseline 194 + 5 new); live acceptance
+  (real frames from Window and Monitor separately on the owner's
+  machine) still unverified.
 - Portal-fix gaps found by verification, all fixed in the
   follow-up (`ffff504`): (1) Closed detection is now checked
   immediately before Start and after Start succeeds before
@@ -416,7 +418,7 @@ integrates worktree work onto `main`.
 | GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM); live-path/registry wiring pending (next: GPU-first workstream) |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
-| Wayland backend-general | to be spawned, fresh worktree off current main | Backend-general selection handling (wlr chooser at SelectSources, GNOME/KDE at Start); source-type verification (no silent target changes); monitor fallback per `CaptureConfig`; fresh sessions on retry; cancelled-Start diagnostic; mock scenarios | Not started; gaps verified in §7 |
+| Wayland backend-general | backend-general worker, worktree `~/workspace/pixelflow-wayland-general`, branch `wayland/backend-general` | Backend-general selection handling (wlr chooser at SelectSources, GNOME/KDE at Start); source-type verification (no silent target changes); monitor fallback per `CaptureConfig`; fresh sessions on retry; cancelled-Start diagnostic; mock scenarios | Integrated and pushed at `d3c4b41`; full suite 199 passed / 0 failed; live acceptance (real frames, Window and Monitor) still unverified |
 | Requirements/status | coordinator | This document | This file |
 
 Concurrent writers use isolated worktrees. Workers commit in their
@@ -523,12 +525,12 @@ In execution order (§11 of the owner directive):
    fallback, `ExecutionBackend` unified on the core contract);
    device run still required before any GPU claim. Live-path and
    registry wiring of the GPU node is the next GPU workstream.
-5. Wayland backend-general (next workstream, not started):
-   source-type verification (no silent target changes); monitor
-   fallback per `CaptureConfig` (window failure → fresh monitor
-   session, reported explicitly); fresh sessions on retry;
-   cancelled-Start diagnostic for GNOME/KDE choosers; mock
-   scenarios for each. Acceptance: real frames from Window and
+5. Wayland backend-general — done at `d3c4b41` (2026-11-10):
+   source-type verification (`SourceMismatch`); monitor fallback
+   per `CaptureConfig` (window failure → fresh monitor session,
+   reported explicitly); fresh sessions on retry; cancelled-Start
+   diagnostic for GNOME/KDE choosers; mock scenarios for each.
+   Acceptance still open: real frames from Window and
    Monitor capture separately on the owner's machine.
 6. Continue Contour development without sacrificing any restoration
    responsibility (§4).
