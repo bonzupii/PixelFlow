@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `9fc552a`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `38cdf67`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -349,7 +349,7 @@ Contour product algorithm; do not confuse the two.
   if no window appears there either, the defect is
   presenter/adapter-side, not capture.
 - Cancelled window selection is terminal in code (2026-11-10,
-  `71dcefd`/`70cb8d0`/`4ab112b`): a cancelled SelectSources or
+  `b08a782`/`5fd8727`/`c48540c`): a cancelled SelectSources or
   Start response maps to typed `WaylandError::SelectionCancelled`
   / `CaptureError::SelectionCancelled` (one mapping,
   `selection_response_error` in `portal.rs`, for both calls), and
@@ -358,7 +358,9 @@ Contour product algorithm; do not confuse the two.
   through `CaptureError`) still falls back to monitor once.
   Mock-portal scenarios in `run.rs` pin both paths, and
   `portal.rs` pins the mapping. Full suite 233 passed / 0 failed
-  (baseline 226 + 7 new). The window request itself is unchanged:
+  (baseline 226 + 7 new). Integrated at `38cdf67` (rebased onto
+  `b0a9a95`, gate verified independently: build, suite 233/0, fmt,
+  clippy gate). The window request itself is unchanged:
   it differs from the monitor request only in the `types` bit
   (`run_session`), and the wlr backend runs its chooser at
   SelectSources, so a Cancelled response there means the chooser
@@ -716,3 +718,21 @@ In execution order (§11 of the owner directive):
    infrastructure. Each port is verified with the full gate before
    any push, and everything is re-measured fresh per algo — no
    findings carry over from the old Contour.
+10. Mix-and-match layers (owner direction, 2026-11-10; queued
+    behind the scaler ports). Processing steps are sequential pure
+    functions — the output of one is the input of the next — and
+    they must be configurable as mix-and-matchable layers: each
+    step (edge detection, blending, and the rest) is a layer the
+    user can configure, swap, and compose. PixelFlow in the
+    reference is already four separate pure functions run
+    sequentially (AaCut crisp reconstruction, Contour soft
+    reconstruction, guard-weight dither field, blend); Contour's
+    blending is inlined inside its implementation, not a separate
+    function — factoring it out is part of this work if Contour's
+    steps are to be mixable. The graph executor runs nodes
+    sequentially in topological order, but the Node trait takes
+    `&mut self` and permits stateful history, so purity is not
+    guaranteed by the interface — the layer design must use pure
+    frame-in/frame-out functions. No configuration format is
+    invented here: build the layer mechanism, and the
+    configuration surface follows the owner's call.
