@@ -36,14 +36,14 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `ffff504`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `28b466f`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
 | `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
-| `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); device run unverified — no adapter on this VM; not yet wired into the live path or the algorithm registry |
+| `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); wired into the live path and the algorithm registry at `aea977c` (`nearest-gpu` registered; live `run` resolves `nearest` to the GPU node when an adapter is present); device run unverified — no adapter on this VM |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
 | `pixelflow-present` | wgpu presentation window, aspect-ratio-preserving layout, frame slot with latest-frame-wins, event-loop wake-up via event proxy | Implemented; no GPU compute (display only) |
@@ -68,9 +68,8 @@ Processing contracts as they exist at HEAD:
   backend). One real GPU compute node exists in `pixelflow-gpu`
   (`GpuNearestNode`, WGSL, integer texels, explicit device sync, no
   silent CPU fallback); its parity test runs through the real graph
-  executor and skips honestly with no adapter. It is not yet wired
-  into the live path or the algorithm registry — that wiring is the
-  framework integration.
+  executor and skips honestly with no adapter. It was wired into
+  the live path and the algorithm registry at `aea977c`.
 
 ## 3. Algorithm integration framework
 
@@ -209,8 +208,11 @@ Contour product algorithm; do not confuse the two.
   is naga-validated but has never executed: this VM has no wgpu
   adapter (no Vulkan ICD, no lavapipe), so the parity check has never
   run against a device. A device run on hardware with an adapter is
-  required before any GPU claim is made, and the node is not yet
-  wired into the live path or the registry.
+  required before any GPU claim is made. The node is wired into the
+  live path and the registry at `aea977c` (`nearest-gpu` id; live
+  `run` resolves `nearest` to it when an adapter is present, reports
+  the effective backend, and errors loudly for an explicit GPU
+  request with no adapter).
 
 ## 6. Capture and presentation requirements
 
@@ -320,6 +322,13 @@ Contour product algorithm; do not confuse the two.
   0 failed at `d3c4b41` (baseline 194 + 5 new); live acceptance
   (real frames from Window and Monitor separately on the owner's
   machine) still unverified.
+- Live frame delivery failure (owner run 12:00 2026-11-10, HEAD
+  `6bbc989`): monitor fallback starts and PipeWire connects, but
+  no frames reach presentation — no output window, game stays at
+  native resolution. Window capture still fails at SelectSources.
+  The frame path (PipeWire buffers, processing, presentation) is
+  under fix by the frame-delivery worker; session opened and
+  PipeWire connected do not count as success.
 - Portal-fix gaps found by verification, all fixed in the
   follow-up (`ffff504`): (1) Closed detection is now checked
   immediately before Start and after Start succeeds before
@@ -334,10 +343,9 @@ Contour product algorithm; do not confuse the two.
 - GPU execution: UNVERIFIED on a device. The crate is integrated;
   no adapter on this VM.
 - Previous coordinator `338e91a0` (spawned 2026-11-10 07:22) is
-  superseded by the current coordinator. It landed the portal fix and
-  the PNG writer fix, then went quiet; it cannot be closed from the
-  coordinator's scope and must be closed by the main agent. Its tree
-  state was clean at handover; no uncommitted work was lost. A release
+  superseded by the current coordinator and shut down (confirmed).
+  It landed the portal fix and the PNG writer fix, then went quiet.
+  Its tree state was clean at handover; no uncommitted work was lost. A release
   test run (`cargo test --release`, separate target dir) observed in
   flight at 16:27 UTC may belong to its subtree.
 - "Algorithm 20" removal from user-facing output: done (`c6accd0`,
@@ -388,6 +396,14 @@ Contour product algorithm; do not confuse the two.
   fixtures exercised (38 s). `cargo clippy -p pixelflow-wayland
   --all-targets` exits 0; `cargo clippy --workspace --all-targets`
   still fails on the 30 known `contour.rs` diagnostics (ceiling).
+  Baseline at `d3c4b41` verified by the coordinator (debug, 2026-11-10,
+  `cargo test --workspace` under `dbus-run-session` with
+  `PIXELFLOW_FIXTURES_DIR` set, exit 0): 199 passed / 0 failed —
+  the 194 from `ffff504` plus 5 new backend-general tests (1 capture
+  reusability, 4 CLI fallback). Baseline at `aea977c` verified by the
+  coordinator (debug, 2026-11-10, same gates, exit 0): 213 passed
+  / 0 failed — the 199 from `d3c4b41` plus 14 new GPU wiring tests
+  (6 GPU factory unit, 3 registry integration, 4 `run.rs`, 1 `main.rs`).
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
@@ -417,6 +433,8 @@ integrates worktree work onto `main`.
 | Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Integrated and pushed at `c6accd0`; `ExecutionBackend` unified on the core contract type; contour header scrubbed |
 | GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM) |
 | GPU live-path wiring | GPU wiring worker, worktree `~/workspace/pixelflow-gpu-wire`, branch `gpu/live-path` | Register `nearest-gpu` in the CLI registry; live `run` path resolves `nearest` to the GPU node with an adapter, reports the effective backend, errors loudly for explicit GPU requests with no adapter | Integrated and pushed at `aea977c`; full suite 213 passed / 0 failed; device run and live-path parity still unverified (no adapter on this VM) |
+| Frame delivery | frame-delivery worker, worktree `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery` | Trace the frame path (PipeWire buffers, processing, presentation) to where frames stop on the owner's machine; smallest fix; reproduction test | In progress (spawned 2026-11-10 12:16); base `28b466f` |
+| Region routing | unassigned — worker `19add74f` closed explicitly by the coordinator 2026-11-10 after 1m37s with no result, to avoid a second concurrent writer on `run.rs` while the frame-delivery fix runs | Meaningful per-class routing with genuinely different paths (not all-to-Contour); routing table + resolver; masks/overrides precedence; hysteresis/halo | Open workstream, not dropped; respawn after the frame-delivery fix lands |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
 | Wayland backend-general | backend-general worker, worktree `~/workspace/pixelflow-wayland-general`, branch `wayland/backend-general` | Backend-general selection handling (wlr chooser at SelectSources, GNOME/KDE at Start); source-type verification (no silent target changes); monitor fallback per `CaptureConfig`; fresh sessions on retry; cancelled-Start diagnostic; mock scenarios | Integrated and pushed at `d3c4b41`; full suite 199 passed / 0 failed; live acceptance (real frames, Window and Monitor) still unverified |
@@ -505,7 +523,7 @@ a documented blocker.
   structurally (`MockFaults` grouping, sync zbus methods, recorded
   call arguments, scenario helpers; the Session version property
   nobody reads is deleted). Wayland clippy clean; full suite 194
-  passed / 0 failed at this HEAD.
+  passed / 0 failed at `ffff504`.
 
 ## 12. Remaining work and acceptance criteria
 
@@ -513,12 +531,28 @@ In execution order (§11 of the owner directive):
 
 1. Baseline test suite — done at `4b1289a` (155 passed / 0 failed);
    re-verified at `c1c3a88` (168), at `c6accd0` (190), at `ffff504`
-   (194 passed / 0 failed, fixtures exercised).
+   (194 passed / 0 failed, fixtures exercised), at `d3c4b41` (199),
+   at `aea977c` (213).
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
-   Live acceptance on the owner's machine still open: his backend
-   is wlr (MangoWM 0.17.4, chooser fails at SelectSources).
+   Backend-general fixes — integrated at `d3c4b41`. Live acceptance
+   on the owner's machine still open, and the failure moved: owner
+   run 12:00 2026-11-10 (HEAD `6bbc989`, clean build) — window
+   capture still fails at SelectSources (cancelled); monitor
+   fallback starts (selection complete, PipeWire connected, node 65
+   then 119, 1920x1080, "capturing monitor") but no output window
+   appears and the game stays at native resolution: no frames reach
+   presentation. Frame-delivery fix in progress (worktree
+   `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery`,
+   base `28b466f`). Acceptance, each reported separately: (1)
+   window capture delivers frames, or monitor fallback delivers
+   frames — separately, fallback is not window capture; (2)
+   transformed output visible (game upscaled, not native
+   resolution); (3) repeated capture attempts work; (4) failure
+   cleanup leaves no broken sessions. Session opened, PipeWire
+   connected, mock tests passing, or a better error message do not
+   count as success.
 3. Algorithm integration framework — integrated at `c6accd0`;
    acceptance per §3. "Algorithm 20" removal — done with it.
 4. GPU processing with CPU retained — crate integrated at `c1c3a88`
