@@ -1,38 +1,13 @@
 //! Execution backend and per-algorithm GPU capability: the
-//! GPU-side declarations the framework wires into the core
-//! contract at integration.
+//! GPU-side declarations for the core contract. `ExecutionBackend`
+//! is the core contract's type, re-exported here so the GPU node
+//! and the registry mean the same thing by a backend value.
 
-use std::fmt;
-
-/// Where a node runs: the CPU path that already exists, or the
-/// GPU compute path this crate provides. CPU stays available
-/// as fallback, reference, and for algorithms without GPU
-/// implementations; it is never the default when a GPU adapter
-/// exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExecutionBackend {
-    /// Synchronous CPU execution, the existing path.
-    Cpu,
-    /// wgpu compute execution on the selected adapter.
-    Gpu,
-}
-
-impl ExecutionBackend {
-    /// Short stable name, for configuration and diagnostics.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            ExecutionBackend::Cpu => "cpu",
-            ExecutionBackend::Gpu => "gpu",
-        }
-    }
-}
-
-impl fmt::Display for ExecutionBackend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}
+/// The backend a node runs on: the core contract's type, shared
+/// by the registry and this crate. CPU stays available as fallback,
+/// reference, and for algorithms without GPU implementations; it is
+/// never the default when a GPU adapter exists.
+pub use pixelflow_core::ExecutionBackend;
 
 /// Whether an algorithm has a GPU implementation in this
 /// crate, and what kind.

@@ -21,11 +21,11 @@ use crate::format::PixelFormat;
 use crate::graph::{Node, ProcessorNode, SpatialDependency, TemporalDependency};
 use crate::pipeline::{Processor, StrideSupport};
 
-/// Where an algorithm runs. The CPU side exists; the GPU side
-/// is a declaration for now — a GPU worker defines the same
-/// concept in its crate, and the coordinator reconciles the two
-/// at integration. An algorithm lists every backend it can run
-/// on; the registry refuses a backend it does not list.
+/// Where an algorithm runs. This is the one definition: the GPU
+/// crate re-exports it, so a backend value means the same thing in
+/// the contract, the registry, and the GPU node. An algorithm lists
+/// every backend it can run on; the registry refuses a backend it
+/// does not list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutionBackend {
     /// The algorithm runs on the CPU, on [`Frame`] data.
@@ -34,12 +34,20 @@ pub enum ExecutionBackend {
     Gpu,
 }
 
+impl ExecutionBackend {
+    /// Short stable name, for configuration and diagnostics.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            ExecutionBackend::Cpu => "cpu",
+            ExecutionBackend::Gpu => "gpu",
+        }
+    }
+}
+
 impl std::fmt::Display for ExecutionBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExecutionBackend::Cpu => write!(f, "cpu"),
-            ExecutionBackend::Gpu => write!(f, "gpu"),
-        }
+        write!(f, "{}", self.name())
     }
 }
 
