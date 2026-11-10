@@ -36,13 +36,14 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `4b1289a`
-(2026-11-10). Six crates, Rust 1.99.1, edition 2024:
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `c1c3a88`
+(2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
-| `pixelflow-processing` | Algorithms `Contour`, `Nearest`; region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; no algorithm registry yet (framework work in flight) |
+| `pixelflow-processing` | Algorithms `Contour`, `Nearest`; region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; algorithm framework implemented in the framework worktree, integration pending |
+| `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); device run unverified — no adapter on this VM; not yet wired into the live path or the algorithm registry |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
 | `pixelflow-present` | wgpu presentation window, aspect-ratio-preserving layout, frame slot with latest-frame-wins, event-loop wake-up via event proxy | Implemented; no GPU compute (display only) |
@@ -64,7 +65,12 @@ Processing contracts as they exist at HEAD:
 - `Contour` declares `SpatialDependency::Global` — its edge follower
   spans whole scanlines — so any change reruns it whole-frame.
 - `GpuResource` (`core/src/frame.rs`) is an opaque stub (private id, no
-  backend). No GPU compute path exists.
+  backend). One real GPU compute node exists in `pixelflow-gpu`
+  (`GpuNearestNode`, WGSL, integer texels, explicit device sync, no
+  silent CPU fallback); its parity test runs through the real graph
+  executor and skips honestly with no adapter. It is not yet wired
+  into the live path or the algorithm registry — that wiring is the
+  framework integration.
 
 ## 3. Algorithm integration framework
 
@@ -196,10 +202,15 @@ Contour product algorithm; do not confuse the two.
 - Workloads: 256×224 @2x/@4x, 854×480 @2x/@4x, 1920×1080 @2x/@4x,
   3840×2160 where hardware permits. CPU vs GPU on the same
   inputs/hardware. Image-quality comparison vs CPU Contour.
-- No GPU compute exists yet. The presenter uses wgpu for display only.
-  This VM has no wgpu adapter, so GPU execution cannot be verified
-  here; a device run on hardware with an adapter is required before any
-  GPU claim is made.
+- GPU compute exists as one node: `pixelflow-gpu` provides
+  `GpuNearestNode` (WGSL nearest-neighbour, scales 2/4) through the
+  graph executor, with adapter selection discrete → integrated →
+  virtual → CPU last resort and measured transfers. The WGSL shader
+  is naga-validated but has never executed: this VM has no wgpu
+  adapter (no Vulkan ICD, no lavapipe), so the parity check has never
+  run against a device. A device run on hardware with an adapter is
+  required before any GPU claim is made, and the node is not yet
+  wired into the live path or the registry.
 
 ## 6. Capture and presentation requirements
 
@@ -298,6 +309,16 @@ Contour product algorithm; do not confuse the two.
   (`*_20_*`) and test identifiers are not renamed.
 - `docs/architecture.md` says Frame's fields are "public" — stale since
   encapsulation; unfixed.
+- `cargo clippy -p pixelflow-wayland --all-targets` fails with 10
+  pre-existing errors, all in `tests/mock_portal.rs` (unused `async`,
+  underscore-prefixed bindings, unused `self`, one 193-line test
+  function). The wayland lib itself is clean (the `pipewire.rs:240`
+  too-many-lines diagnostic from the portal fix was fixed by
+  `6b57eb3`, splitting stream setup out of `run_loop_inner`). The
+  mock-test lint errors belong to the Wayland follow-up rework of
+  that file; no `#[allow]` anywhere.
+- Wayland follow-up worker: finished its work; report pending
+  delivery to the coordinator, integration pending.
 - Per-stage Contour timing is unmeasured (the bench has no per-stage
   support); allocation profiling with actual tools is still outstanding.
 - Live `--help` execution has not been run on this VM since the dev
@@ -320,6 +341,14 @@ Contour product algorithm; do not confuse the two.
   regression 3, synthetic 17, wayland 25, mock_portal 1. The
   regression run did not set `PIXELFLOW_FIXTURES_DIR`, so
   fixture-based regression identity was not exercised in this run.
+  Baseline at `c1c3a88` verified by the coordinator (debug, 2026-11-10,
+  `cargo test --workspace` under `dbus-run-session`, exit 0): 168 passed
+  / 0 failed — the 155 from `4b1289a` plus 13 from `pixelflow-gpu`
+  (12 unit, 1 parity by honest skip: no adapter on this VM). The
+  wayland lib is clippy-clean; `cargo clippy --workspace
+  --all-targets` still fails on the 30 known `contour.rs` diagnostics
+  (ceiling) plus 10 pre-existing `mock_portal.rs` test-target errors
+  (see §7).
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
@@ -346,10 +375,10 @@ integrates worktree work onto `main`.
 
 | Workstream | Owner | Scope | State |
 | --- | --- | --- | --- |
-| Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Running |
-| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Running |
+| Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Completed in worktree, awaiting coordinator integration (report pending delivery) |
+| GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Integrated and pushed at `c1c3a88`; device run unverified (no adapter on this VM); live-path wiring pending framework integration |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
-| Wayland follow-up | to be spawned, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key) | Not started |
+| Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario | Finished; report pending delivery, integration pending |
 | Requirements/status | coordinator | This document | This file |
 
 Concurrent writers use isolated worktrees. Workers commit in their
@@ -408,21 +437,34 @@ a documented blocker.
   Verified end to end by the coordinator (2026-11-10): `pixelflow
   upscale` on `ct.png` (256x222) at 2x nearest exits 0 and writes a
   512x444 PNG.
+- `6b57eb3` — Wayland: split `PipeWire` stream setup out of
+  `run_loop_inner` (fixes the `too_many_lines` clippy diagnostic
+  the portal fix introduced; wayland tests 25 + 1 pass under
+  `dbus-run-session`).
+- `431f22c`, `c1c3a88` — GPU: add `pixelflow-gpu` crate (context,
+  image, backend types) and the WGSL nearest-neighbour compute node
+  with parity test. Integrated and pushed by the coordinator;
+  `ls-remote` verified at `c1c3a88`.
 
 ## 12. Remaining work and acceptance criteria
 
 In execution order (§11 of the owner directive):
 
-1. Baseline test suite at `4b1289a` — running; record result.
+1. Baseline test suite at `4b1289a` — done (155 passed / 0 failed);
+   re-verified at `c1c3a88` — 168 passed / 0 failed.
 2. Wayland verification report — done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded); live acceptance on the owner's machine still open.
-   Wayland follow-up fixes (gaps 1, 2, 4, 5; assess 3) — to be spawned.
-3. Algorithm integration framework — in flight; acceptance per §3.
-4. GPU processing with CPU retained — in flight; acceptance: real wgpu
-   compute node through the graph, pixel-identical to CPU nearest,
-   adapter fallback chain implemented, no silent CPU fallback, device
-   run required before any GPU claim.
+   Wayland follow-up fixes (gaps 1, 2, 4, 5; assess 3; plus the
+   cancelled-selection fix) — worker finished, integration pending
+   its report.
+3. Algorithm integration framework — completed in the framework
+   worktree, integration pending the worker's report; acceptance
+   per §3.
+4. GPU processing with CPU retained — crate integrated at `c1c3a88`
+   (WGSL nearest node, adapter fallback chain, no silent CPU
+   fallback); device run still required before any GPU claim, and
+   live-path/registry wiring pending framework integration.
 5. "Algorithm 20" removal from user-facing output — assigned to the
    framework workstream.
 6. Continue Contour development without sacrificing any restoration
