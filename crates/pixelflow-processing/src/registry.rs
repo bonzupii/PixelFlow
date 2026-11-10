@@ -15,6 +15,7 @@
 //! source-level (a Rust crate interface): there is no dynamic
 //! plugin ABI.
 
+use crate::algorithms::bicubic::BicubicAlgorithm;
 use crate::algorithms::bilinear::BilinearAlgorithm;
 use crate::algorithms::contour::ContourAlgorithm;
 use crate::algorithms::nearest::NearestAlgorithm;
@@ -41,13 +42,14 @@ impl AlgorithmRegistry {
     }
 
     /// The registry with every built-in algorithm registered:
-    /// Contour, Nearest, Bilinear, and `PixelFlow`.
+    /// Contour, Nearest, Bilinear, Bicubic, and `PixelFlow`.
     #[must_use]
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(ContourAlgorithm));
         registry.register(Box::new(NearestAlgorithm));
         registry.register(Box::new(BilinearAlgorithm));
+        registry.register(Box::new(BicubicAlgorithm));
         registry.register(Box::new(PixelFlowAlgorithm));
         registry
     }

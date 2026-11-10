@@ -25,13 +25,13 @@ fn frame_2x2() -> Result<Frame, String> {
 }
 
 #[test]
-fn builtin_registry_lists_four_algorithms() {
+fn builtin_registry_lists_five_algorithms() {
     let registry = AlgorithmRegistry::builtin();
     assert_eq!(
         registry.ids(),
-        vec!["contour", "nearest", "bilinear", "pixelflow"]
+        vec!["contour", "nearest", "bilinear", "bicubic", "pixelflow"]
     );
-    assert_eq!(registry.descriptors().len(), 4);
+    assert_eq!(registry.descriptors().len(), 5);
 }
 
 #[test]
@@ -48,6 +48,7 @@ fn unknown_algorithm_error_lists_the_registered_ids() {
                 "contour".to_string(),
                 "nearest".to_string(),
                 "bilinear".to_string(),
+                "bicubic".to_string(),
                 "pixelflow".to_string(),
             ],
         }
@@ -55,7 +56,7 @@ fn unknown_algorithm_error_lists_the_registered_ids() {
     assert!(
         error
             .to_string()
-            .contains("available: contour, nearest, bilinear, pixelflow")
+            .contains("available: contour, nearest, bilinear, bicubic, pixelflow")
     );
 }
 
@@ -111,6 +112,22 @@ fn bilinear_descriptor_declares_a_radius_1_neighborhood() -> Result<(), String> 
     );
     assert!(!descriptor.tile_safe);
     assert_eq!(descriptor.supported_scales, vec![2, 4]);
+    Ok(())
+}
+
+#[test]
+fn bicubic_descriptor_declares_a_radius_2_neighborhood() -> Result<(), String> {
+    let registry = AlgorithmRegistry::builtin();
+    let descriptor = registry.descriptor("bicubic").map_err(|e| e.to_string())?;
+    assert_eq!(descriptor.display_name, "Bicubic");
+    assert_eq!(
+        descriptor.spatial_dependency,
+        SpatialDependency::Neighborhood { radius: 2 }
+    );
+    assert!(!descriptor.tile_safe);
+    assert_eq!(descriptor.supported_scales, vec![2, 4]);
+    assert_eq!(descriptor.working_bytes_per_output_pixel, Some(5));
+    assert_eq!(descriptor.estimated_working_bytes(100), Some(500));
     Ok(())
 }
 

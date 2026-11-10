@@ -15,7 +15,7 @@
 //! behaviour, not a regression in this crate.
 
 use pixelflow_core::{Frame, PixelFormat, Processor};
-use pixelflow_processing::{Contour, Nearest, PixelFlow};
+use pixelflow_processing::{Bicubic, Contour, Nearest, PixelFlow};
 use std::path::PathBuf;
 
 fn fixtures_dir() -> PathBuf {
@@ -185,6 +185,38 @@ fn pixelflow_fixture_baseline_at_4x() -> Result<(), String> {
         );
         let (max, over_one) = compare(&out, &expected);
         println!("pixelflow {name}: max abs diff {max}, pixels differing by >1: {over_one}");
+    }
+    Ok(())
+}
+
+#[test]
+fn bicubic_fixture_baseline_at_4x() -> Result<(), String> {
+    // Baseline numbers for the new algorithm, not a match to the
+    // old Contour's identity: Bicubic is a Catmull-Rom
+    // resampler, so its output differs from the old
+    // `{name}_20_clean_base.png` expectations by design. The
+    // numbers printed here are the recorded baseline; only the
+    // dimensions are asserted.
+    let dir = fixtures_dir();
+    if !fixtures_present(&dir) {
+        println!("fixtures not present, skipping bicubic baseline test");
+        return Ok(());
+    }
+    let algo = Bicubic;
+    for name in ["ct", "eb", "ct2", "zelda", "mario", "ctnew"] {
+        let input = load_png(&dir.join("inputs").join(format!("{name}.png")))?;
+        let expected = load_png(
+            &dir.join("expected")
+                .join(format!("{name}_20_clean_base.png")),
+        )?;
+        let out = algo.process(&input, 4).map_err(|e| e.to_string())?;
+        assert_eq!(
+            (out.width(), out.height()),
+            (expected.width(), expected.height()),
+            "{name}: size"
+        );
+        let (max, over_one) = compare(&out, &expected);
+        println!("bicubic {name}: max abs diff {max}, pixels differing by >1: {over_one}");
     }
     Ok(())
 }

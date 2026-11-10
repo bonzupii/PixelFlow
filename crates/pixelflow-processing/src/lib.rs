@@ -9,6 +9,7 @@ pub mod algorithms;
 pub mod region_analysis;
 pub mod registry;
 
+pub use algorithms::bicubic::{Bicubic, BicubicAlgorithm};
 pub use algorithms::bilinear::{Bilinear, BilinearAlgorithm};
 pub use algorithms::contour::{Contour, ContourAlgorithm, LimitedContour};
 pub use algorithms::nearest::{Nearest, NearestAlgorithm};

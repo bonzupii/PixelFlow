@@ -14,7 +14,7 @@ fn builtin_registry_holds_only_the_cpu_algorithms() {
     let registry = AlgorithmRegistry::builtin();
     assert_eq!(
         registry.ids(),
-        vec!["contour", "nearest", "bilinear", "pixelflow"]
+        vec!["contour", "nearest", "bilinear", "bicubic", "pixelflow"]
     );
     assert!(matches!(
         registry.descriptor("nearest-gpu"),
@@ -28,7 +28,14 @@ fn gpu_nearest_registers_and_describes_through_the_registry() {
     registry.register(Box::new(NearestGpuAlgorithm));
     assert_eq!(
         registry.ids(),
-        vec!["contour", "nearest", "bilinear", "pixelflow", "nearest-gpu"]
+        vec![
+            "contour",
+            "nearest",
+            "bilinear",
+            "bicubic",
+            "pixelflow",
+            "nearest-gpu"
+        ]
     );
     let descriptor = registry
         .descriptor("nearest-gpu")
@@ -51,7 +58,7 @@ fn gpu_nearest_lookup_fails_with_the_available_ids() {
             assert_eq!(id, "nearest-gpu");
             assert_eq!(
                 available,
-                vec!["contour", "nearest", "bilinear", "pixelflow"]
+                vec!["contour", "nearest", "bilinear", "bicubic", "pixelflow"]
             );
         }
         other => panic!("expected an unknown-algorithm error, got {other:?}"),
