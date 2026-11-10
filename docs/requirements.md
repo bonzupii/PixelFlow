@@ -36,7 +36,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `0ba9d38`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `9fc552a`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -681,3 +681,22 @@ In execution order (§11 of the owner directive):
    Performance and quality, Platform support, Documentation).
    Wayland is urgent but does not monopolize: GPU, Contour,
    framework, and offline/benchmark work advance independently.
+9. Scaler ports from the reference file
+   `~/workspace/user/files/pixelflow_scalers.rs` (owner decisions,
+   2026-11-10; 19 IN, 6 OUT, 0 undecided; queued behind the CI fix,
+   main green 2026-11-10 at `9fc552a`, CI success on `0ba9d38` and
+   `9fc552a`). IN, in port order: PixelFlow (the reference's
+   `fr_contour_guard`, ported under the name PixelFlow, flagship —
+   first), then nearest, bilinear, bicubic, lanczos3, scale2x, epx,
+   eagle, mmpx, hq_style, xbr, sabr_style, xbrz_style, aa_cut,
+   labelset, Contour (old, stays Contour), layer_grain,
+   edgemix_aacut, edgemix_sabr. OUT, never ported, never
+   re-proposed: sharp_bilinear, scale3x, superxbr_style, dcci,
+   pixelflow, directional. The reference's own `pixelflow` algo is
+   OUT and is a different algorithm from the renamed ContourGuard;
+   the two must not be confused. The OUT list governs selectable
+   algorithms only: it does not remove the planner's internal
+   sharp-bilinear fractional close step, which is pipeline
+   infrastructure. Each port is verified with the full gate before
+   any push, and everything is re-measured fresh per algo — no
+   findings carry over from the old Contour.
