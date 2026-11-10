@@ -1696,6 +1696,17 @@ name = "pixelflow-core"
 version = "0.1.0"
 
 [[package]]
+name = "pixelflow-gpu"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "pixelflow-core",
+ "pixelflow-processing",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "pixelflow-present"
 version = "0.1.0"
 dependencies = [

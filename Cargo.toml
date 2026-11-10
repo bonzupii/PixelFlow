@@ -7,6 +7,7 @@ members = [
     "crates/pixelflow-wayland",
     "crates/pixelflow-present",
     "crates/pixelflow-cli",
+    "crates/pixelflow-gpu",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ pixelflow-processing = { path = "crates/pixelflow-processing" }
 pixelflow-capture = { path = "crates/pixelflow-capture" }
 pixelflow-wayland = { path = "crates/pixelflow-wayland" }
 pixelflow-present = { path = "crates/pixelflow-present" }
+pixelflow-gpu = { path = "crates/pixelflow-gpu" }
 clap = { version = "4", features = ["derive"] }
 png = "0.18"
 ashpd = { version = "0.14", features = ["screencast", "pipewire"] }
@@ -31,6 +33,7 @@ zbus = "6"
 wgpu = "30"
 winit = "0.30"
 pollster = "0.4"
+naga = { version = "30", features = ["wgsl-in"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

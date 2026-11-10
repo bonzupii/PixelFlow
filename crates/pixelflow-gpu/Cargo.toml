@@ -1,0 +1,17 @@
+[package]
+name = "pixelflow-gpu"
+version = "0.1.0"
+edition = "2024"
+description = "PixelFlow GPU execution: adapter selection, GPU-resident images, and GPU compute nodes"
+
+[dependencies]
+pixelflow-core = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+
+[dev-dependencies]
+naga = { workspace = true }
+pixelflow-processing = { workspace = true }
+
+[lints]
+workspace = true
