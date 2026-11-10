@@ -785,16 +785,24 @@ fn pixelflow_flat_color_is_preserved_exactly() -> Result<(), String> {
 }
 
 #[test]
-fn pixelflow_checkerboard_matches_contour() -> Result<(), String> {
+fn pixelflow_checkerboard_is_replicated() -> Result<(), String> {
     // A checkerboard is dither-like in the interior, so the
     // guard weight is 1 there and the output is the soft branch
-    // exactly. The border band blends toward the crisp branch
-    // (the clamped edge makes border pixels non-lonely), so
-    // only the central region is compared: output pixels with
-    // coordinates in [3k, 5k), where the upsampled field samples
-    // only weight-1 source pixels.
+    // exactly. The soft branch's dither bypass replicates
+    // checkerboard pixels into their blocks, which is exactly
+    // nearest-neighbour replication, so the centre equals the
+    // crisp branch there. The border band blends toward the
+    // crisp branch anyway (the clamped edge makes border pixels
+    // non-lonely), so only the central region is compared:
+    // output pixels with coordinates in [3k, 5k), where the
+    // upsampled field samples only weight-1 source pixels.
+    // The soft branch itself is the reference `contour_impl`,
+    // ported privately inside the PixelFlow module; the unit
+    // test `checkerboard_takes_the_soft_branch` compares
+    // against it directly, and the oracle log is the
+    // bit-identity evidence against the reference.
     let guard = PixelFlow;
-    let contour = Contour;
+    let nearest = Nearest;
     let input = rgb_frame(8, 8, |col, row| {
         if (col + row) % 2 == 0 {
             [0, 0, 0]
@@ -806,7 +814,7 @@ fn pixelflow_checkerboard_matches_contour() -> Result<(), String> {
         let from_guard = guard
             .process(&input, scale)
             .map_err(|err| err.to_string())?;
-        let from_contour = contour
+        let from_nearest = nearest
             .process(&input, scale)
             .map_err(|err| err.to_string())?;
         let scale_us = usize::try_from(scale).map_err(|err| err.to_string())?;
@@ -816,8 +824,8 @@ fn pixelflow_checkerboard_matches_contour() -> Result<(), String> {
                 let dst = (oy * out_w + ox) * 3;
                 assert_eq!(
                     &from_guard.data()[dst..dst + 3],
-                    &from_contour.data()[dst..dst + 3],
-                    "checkerboard centre at {scale}x differs from the soft branch at ({ox}, {oy})"
+                    &from_nearest.data()[dst..dst + 3],
+                    "checkerboard centre at {scale}x differs from replication at ({ox}, {oy})"
                 );
             }
         }

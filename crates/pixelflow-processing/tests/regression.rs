@@ -160,7 +160,8 @@ fn contour_matches_python_reference_at_4x() -> Result<(), String> {
 fn pixelflow_fixture_baseline_at_4x() -> Result<(), String> {
     // Baseline numbers for the new algorithm, not a match to the
     // old Contour's identity: PixelFlow blends AaCut with the
-    // repo's Contour, so its output differs from the old
+    // reference `contour_impl` (ported privately as its soft
+    // branch), so its output differs from the old
     // `{name}_20_clean_base.png` expectations by design. The
     // numbers printed here are the recorded baseline; only the
     // dimensions are asserted.

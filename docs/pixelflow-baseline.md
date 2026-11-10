@@ -11,40 +11,42 @@ not ported.
 
 The crisp branch is the `AaCut` stage (`st_aacut`), ported as a
 supporting stage inside `crates/pixelflow-processing/src/algorithms/pixelflow.rs`.
-The soft branch is the repo's existing `Contour` processor, called
-unmodified. The per-pixel guard weight (`guard_weight`, 0.2 to 0.5)
+The soft branch is the reference's own `contour_impl`, ported as the
+private `contour_soft` inside the same module: a structure-tensor
+anisotropic-gaussian reconstruction over 7x7 taps, with the
+checkerboard and stripe dither bypass. It is not the repo's `Contour`
+algorithm, which is a different, older algorithm (the combined recipe
+plus the edge follower over whole scanlines) and stays untouched in
+`contour.rs`. The per-pixel guard weight (`guard_weight`, 0.2 to 0.5)
 cross-fades the two branches through `blend_by_field`, upsampled
 with `field_up`.
 
-One mapping difference, stated plainly: the reference's soft branch
-is its own `contour_impl` (a structure-tensor
-anisotropic-gaussian reconstruction over 7x7 taps), while the repo's
-`Contour` is an older algorithm (the combined recipe plus the edge
-follower over whole scanlines). They are not the same code and do not
-produce the same output, so PixelFlow's output is not bit-identical
-to the reference `fr_contour_guard` where the soft branch
-contributes. The reference `contour_impl` was not re-ported.
+The first port (commit 74b4a7c) used the repo's `Contour` as the soft
+branch. That was the wrong algorithm under the flagship name: the
+oracle showed divergence where the soft branch contributes
+(checkerboard max abs diff 46 at 2x, 175 at 4x; mixed 48x40 scene 62
+at 2x, 167 at 4x). The correction (this branch, rebased onto main
+f930678) replaces the soft branch with the ported `contour_impl`.
+The old numbers do not carry over; every measurement below is fresh.
 
-Scales are 2 and 4 only, set by the soft branch: the reference lists
-2 to 6, but the repo's `Contour` supports only 2 and 4.
+Scales are 2 and 4 only: the port is verified against the reference
+at those scales, and no other scale is claimed.
 
 ## Oracle verification
 
 A harness built from the reference file (`rustc --edition 2021 -O`,
 5 scenes: 3x3 L, flat, 8x8 checker, 48x40 mixed scene, 16x16
-diagonal) compared against the repo port. Full comparison log:
-`cg-port-oracle.log` in the goal's hidden files.
+diagonal) compared against the repo port. The reference source used
+for the harness is code-identical to the current reference file
+(verified by stripping comments and diffing). Full comparison log:
+`cg-port-oracle-v2.log` in the goal's hidden files.
 
 - Guard weight: bit-identical to the reference on all 5 scenes
-  (exact f32 bytes, 0 differing values).
-- AaCut: bit-identical on the weight-0 scenes (L, flat, diagonal)
-  at 2x and 4x (max abs diff 0).
-- Full `fr_contour_guard` vs repo PixelFlow: identical (max abs
-  diff 0) on L, flat, and diagonal, where the guard weight is 0 and
-  only the crisp branch contributes. Divergent where the soft branch
-  contributes, as expected from the mapping difference above:
-  checkerboard max abs diff 46 at 2x, 175 at 4x; mixed 48x40 scene
-  max abs diff 62 at 2x, 167 at 4x.
+  (exact f32 bytes, 0 differing values). The `guard_weight`
+  function is unchanged since the first port, verified by diffing
+  it against the first port's commit.
+- Full `fr_contour_guard` vs repo PixelFlow: bit-identical on all
+  5 scenes at 2x and 4x (max abs diff 0, 0 bytes differing).
 
 ## Re-measurement 1: flat-color shift
 
@@ -63,30 +65,36 @@ New baseline numbers, measured against the old Contour expected
 PNGs in the fixture set. These are not a match criterion: the
 expected PNGs are old Contour outputs, and PixelFlow is a different
 algorithm. Test `pixelflow_fixture_baseline_at_4x`; raw output in
-`cg-port-baseline-fixtures.log`.
+`cg-port2-baseline-fixtures.log`.
 
 | fixture | max abs diff | pixels differing by >1 |
 |---------|-------------:|-----------------------:|
-| ct      |          224 |                 750558 |
-| eb      |          173 |                 310052 |
-| ct2     |          104 |                 256940 |
-| zelda   |          255 |                 722209 |
-| mario   |          248 |                 840107 |
-| ctnew   |          231 |                 768947 |
+| ct      |          224 |                 780041 |
+| eb      |          173 |                 310146 |
+| ct2     |          216 |                 266583 |
+| zelda   |          255 |                 725959 |
+| mario   |          248 |                 841453 |
+| ctnew   |          231 |                 772606 |
 
 ## Re-measurement 3: timing
 
 Release CLI (`target/release/pixelflow upscale --algorithm
 pixelflow`), 3 runs each, deterministic synthetic scenes. Raw log:
-`cg-port-measure.log`. The per-frame budget is ~16.7 ms.
+`cg-port2-measure.log`. The per-frame budget is ~16.7 ms.
 
 | case | output | run 1 | run 2 | run 3 |
 |------|--------|------:|------:|------:|
-| mixed 480x270 @4x | 1920x1080 | 0.6 s | 0.7 s | 0.7 s |
-| mixed 960x540 @2x | 1920x1080 | 1.0 s | 1.0 s | 0.7 s |
-| flat 480x270 @4x  | 1920x1080 | 0.6 s | 0.6 s | 0.6 s |
+| mixed 480x270 @4x | 1920x1080 | 0.9 s | 0.8 s | 0.9 s |
+| mixed 960x540 @2x | 1920x1080 | 1.3 s | 1.2 s | 1.3 s |
+| flat 480x270 @4x  | 1920x1080 | 0.2 s | 0.2 s | 0.2 s |
 
 PixelFlow is far faster than the old Contour's 9.1 s/frame at the
-same output size, and still 36x to 60x over the ~16.7 ms budget.
-The cost is dominated by the soft branch: the repo's Contour runs
-on every output pixel regardless of the guard weight.
+same output size, and still 48x to 78x over the ~16.7 ms budget.
+The cost is dominated by the soft branch: the ported `contour_impl`
+runs the full 7x7 anisotropic reconstruction on every output
+pixel, regardless of the guard weight. Mixed scenes are slower
+than in the first port (0.9 s vs 0.6-0.7 s at 4x, 1.2-1.3 s vs
+0.7-1.0 s at 2x) because the corrected soft branch does more work
+per pixel than the repo's Contour did; flat input is faster
+(0.2 s vs 0.6 s) because the all-same fast path short-circuits
+the reconstruction on uniform windows.
