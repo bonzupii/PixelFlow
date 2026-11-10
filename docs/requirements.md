@@ -243,6 +243,31 @@ Contour product algorithm; do not confuse the two.
   xdg-desktop-portal 1.20.4) is the live test environment; his next
   `pixelflow run` is the acceptance test. His compositor and
   ScreenCast backend are still unknown.
+- New failure on the owner's machine after pulling the P1 commits
+  (2026-11-10 10:53): session creates and cursor negotiation works
+  (ScreenCast v5, offered SourceType(3), advertised CursorMode(3),
+  selected EMBEDDED), then SelectSources fails with `portal error:
+  select sources response: Portal request was cancelled`, and the
+  close after failure fails with `UnknownMethod: Object does not
+  exist at path`. Mechanism (verified against portal.rs and ashpd
+  0.14.0 source): the error is `ResponseError::Cancelled` from the
+  stored selection response — our code holds the request future to
+  completion (ashpd awaits the Response signal inside the call),
+  there is no timeout and no cancel path on the portal side of our
+  code, the session handle is valid, and the request is well-formed
+  for v5. The cancellation is a portal-side Response code 1: the
+  source picker dialog was dismissed, or the compositor backend
+  cancelled the request. Open question: whether the picker dialog
+  appeared on his screen — that distinguishes the two causes and
+  cannot be answered from this VM. The close-after-failure
+  UnknownMethod is expected cleanup, not a second failure: the portal
+  destroyed the session object when the request was cancelled, so
+  `Close` on that path answers "object does not exist". Fix assigned
+  to the Wayland follow-up workstream: tolerant close-after-failure
+  classification, a factual cancelled-selection diagnostic naming the
+  two portal-side causes, and a mock scenario for a gone session on
+  close. No retry and no second SelectSources attempt: a cancelled
+  selection is a terminal failure for that run.
 - Portal-fix gaps found by verification (none fail the claimed fix;
   follow-up work assigned): (1) Closed detection is a single
   non-blocking poll after selection and in the Start error branch —
