@@ -14,12 +14,14 @@
 //! and the compute dispatch waits for the device before any
 //! read of its output.
 
+pub mod algorithm;
 pub mod backend;
 pub mod context;
 pub mod error;
 pub mod image;
 pub mod nearest;
 
+pub use algorithm::{NEAREST_GPU_ID, NearestGpuAlgorithm, nearest_gpu_descriptor};
 pub use backend::{ExecutionBackend, GPU_ALGORITHMS, GpuCapability, backend_for, gpu_capability};
 pub use context::{AdapterCandidate, AdapterSelection, GpuContext, adapter_rank, select_adapter};
 pub use error::GpuError;

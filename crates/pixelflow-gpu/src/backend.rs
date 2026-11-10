@@ -22,8 +22,11 @@ pub enum GpuCapability {
 }
 
 /// Algorithm names with a GPU compute implementation in this
-/// crate, in the order they were added.
-pub const GPU_ALGORITHMS: &[&str] = &["nearest"];
+/// crate, in the order they were added. "nearest" is the CPU
+/// algorithm id the GPU node replaces in the live path, and
+/// "nearest-gpu" is the registry id of the GPU node itself;
+/// both select the same compute implementation.
+pub const GPU_ALGORITHMS: &[&str] = &["nearest", "nearest-gpu"];
 
 /// The GPU capability of the algorithm named `algorithm`, by
 /// its stable processor name (for example `"nearest"`).
@@ -58,6 +61,7 @@ mod tests {
     #[test]
     fn nearest_has_compute_and_unknown_algorithms_do_not() {
         assert_eq!(gpu_capability("nearest"), GpuCapability::Compute);
+        assert_eq!(gpu_capability("nearest-gpu"), GpuCapability::Compute);
         assert_eq!(gpu_capability("contour"), GpuCapability::NotImplemented);
         assert_eq!(gpu_capability(""), GpuCapability::NotImplemented);
     }
@@ -66,6 +70,8 @@ mod tests {
     fn backend_is_gpu_only_with_adapter_and_capability() {
         assert_eq!(backend_for("nearest", true), ExecutionBackend::Gpu);
         assert_eq!(backend_for("nearest", false), ExecutionBackend::Cpu);
+        assert_eq!(backend_for("nearest-gpu", true), ExecutionBackend::Gpu);
+        assert_eq!(backend_for("nearest-gpu", false), ExecutionBackend::Cpu);
         assert_eq!(backend_for("contour", true), ExecutionBackend::Cpu);
         assert_eq!(backend_for("contour", false), ExecutionBackend::Cpu);
     }
