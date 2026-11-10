@@ -260,7 +260,8 @@ fn verify_stream_source(
 impl PortalSession {
     /// Create a session, request the source kind, and start the
     /// capture. Blocks until the user answers the compositor dialog
-    /// or the request fails.    ///
+    /// or the request fails.
+    ///
     /// # Errors
     ///
     /// Returns `Portal` when the D-Bus or portal call fails (no
