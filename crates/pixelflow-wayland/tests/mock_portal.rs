@@ -42,6 +42,9 @@ struct MockConfig {
     /// Emit the session `Closed` signal before answering
     /// `SelectSources`, as a portal that closed the session would.
     emit_closed_after_select: bool,
+    /// Emit the session `Closed` signal before answering `Start`,
+    /// as a portal that closed the session mid-start would.
+    emit_closed_after_start: bool,
 }
 
 impl Default for MockConfig {
@@ -55,6 +58,7 @@ impl Default for MockConfig {
             serial: Some(987_654_321),
             serial_hyphenated: false,
             emit_closed_after_select: false,
+            emit_closed_after_start: false,
         }
     }
 }
@@ -73,6 +77,7 @@ struct SelectRecord {
 struct MockRecord {
     selects: Vec<SelectRecord>,
     starts: usize,
+    opens: usize,
     closes: Vec<String>,
     creates: usize,
 }
@@ -251,22 +256,35 @@ impl MockScreencast {
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
-        _session: OwnedObjectPath,
+        session: OwnedObjectPath,
         _parent_window: String,
         options: HashMap<String, Variant<'_>>,
     ) -> Result<OwnedObjectPath, fdo::Error> {
         let sender = sender_name(&header)?;
         let request = request_path(&sender, &options)
             .ok_or_else(|| fdo::Error::Failed("no handle token in Start".to_string()))?;
-        let (code, serial, serial_hyphenated) = {
+        let (code, serial, serial_hyphenated, emit_closed) = {
             let mut state = lock_state(&self.state);
             state.record.starts += 1;
             (
                 state.config.start_response,
                 state.config.serial,
                 state.config.serial_hyphenated,
+                state.config.emit_closed_after_start,
             )
         };
+        if emit_closed {
+            connection
+                .emit_signal(
+                    None::<()>,
+                    session.as_str(),
+                    "org.freedesktop.portal.Session",
+                    "Closed",
+                    &HashMap::<String, Variant>::new(),
+                )
+                .await
+                .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        }
         let mut results = HashMap::new();
         if code == 0 {
             let mut properties: HashMap<String, Variant<'static>> = HashMap::new();
@@ -294,6 +312,7 @@ impl MockScreencast {
         _session: OwnedObjectPath,
         _options: HashMap<String, Variant<'_>>,
     ) -> Result<OwnedFd, fdo::Error> {
+        lock_state(&self.state).record.opens += 1;
         let file = std::fs::File::open("/dev/null")
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         Ok(OwnedFd::from(std::os::fd::OwnedFd::from(file)))
@@ -338,9 +357,11 @@ async fn open_with_timeout(
 
 /// The mock portal runs on the D-Bus session bus: run this test
 /// under `dbus-run-session` so it owns a private bus. Without a
-/// session bus, or when the portal name is already owned (a real
-/// desktop session), the test skips instead of failing: it cannot
-/// prove anything about the lifecycle there.
+/// session bus the test fails instead of skipping, so a plain
+/// `cargo test` never reports a green mock test that exercised
+/// nothing. When the portal name is already owned (a real desktop
+/// session), the test still skips: it cannot prove anything about
+/// the lifecycle there.
 /// Close a portal session on a blocking thread with a timeout, so
 /// a close that hangs shows up as a failed test instead of a hung
 /// suite. Close runs `block_on` on the session runtime, so it must
@@ -361,10 +382,15 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
     let connection = match Connection::session().await {
         Ok(connection) => connection,
         Err(error) => {
-            eprintln!(
-                "mock portal: no D-Bus session bus ({error}); skipping mock portal test, run under dbus-run-session to exercise it"
-            );
-            return Ok(());
+            // A missing session bus fails the test outright: a
+            // skipped mock test would report green while proving
+            // nothing about the lifecycle. `clippy::panic` denies
+            // `panic!`, so the failure is a returned error carrying
+            // the message instead.
+            return Err(format!(
+                "mock portal: no D-Bus session bus ({error}); run under dbus-run-session to exercise the mock portal test"
+            )
+            .into());
         }
     };
     if let Err(error) = connection
@@ -558,12 +584,48 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
         "Start was never called after the portal closed the session"
     );
 
+    // The portal closes the session after Start succeeds: opening
+    // fails naming the closure, and the PipeWire remote is never
+    // opened on the closed session.
+    let closes_before = lock_state(&state).record.closes.len();
+    let opens_before = lock_state(&state).record.opens;
+    {
+        let mut state = lock_state(&state);
+        state.config.emit_closed_after_select = false;
+        state.config.emit_closed_after_start = true;
+        state.config.start_response = 0;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "a closed session must fail the open");
+    if let Err(error) = failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("closed by the portal"),
+            "the failure names the portal closure: {text}"
+        );
+        assert!(
+            text.contains("after start"),
+            "the failure names the closure happening after start: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(&state).record.opens,
+        opens_before,
+        "the PipeWire remote was never opened on the closed session"
+    );
+    assert_eq!(
+        lock_state(&state).record.closes.len(),
+        closes_before + 1,
+        "the partial session was closed after the closure after start"
+    );
+
     // Start cancelled: opening fails naming the start response, and
     // the partial session is closed.
     let closes_before = lock_state(&state).record.closes.len();
     {
         let mut state = lock_state(&state);
         state.config.emit_closed_after_select = false;
+        state.config.emit_closed_after_start = false;
         state.config.start_response = 1;
     }
     let failed = open_with_timeout(SourceKind::Window).await?;
