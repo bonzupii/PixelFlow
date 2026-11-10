@@ -206,23 +206,26 @@ fn session_already_gone(error: &ashpd::Error) -> bool {
     format_ashpd_error(error).contains("does not exist at path")
 }
 
-/// Map a failed Start response read to the error the caller sees.
-/// A cancellation at Start is portal-side, the same as at
-/// `SelectSources`: backends that show their chooser at Start fail
-/// here when the dialog is dismissed. The code cannot tell
-/// dismissal from a backend cancellation, so the error says both
-/// and asserts neither.
-fn start_response_error(error: &ashpd::Error) -> WaylandError {
+/// Map a failed SelectSources or Start response read to the error
+/// the caller sees. A cancellation is portal-side at either call:
+/// backends that run their chooser at SelectSources fail there
+/// when it is dismissed, and backends that show their chooser at
+/// Start fail here when the dialog is dismissed. The code cannot
+/// tell dismissal from a backend cancellation, so the error says
+/// both and asserts neither. The cancellation keeps its own
+/// variant so the caller can tell a refused selection from any
+/// other portal failure without parsing the message.
+fn selection_response_error(context: &str, error: &ashpd::Error) -> WaylandError {
     if matches!(
         error,
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
     ) {
-        WaylandError::Portal(format!(
-            "read start response: {}; the portal cancelled the request: the source picker dialog was dismissed, or the compositor backend cancelled the request",
+        WaylandError::SelectionCancelled(format!(
+            "{context}: {}; the source picker dialog was dismissed, or the compositor backend cancelled the request",
             format_ashpd_error(error)
         ))
     } else {
-        portal_error("read start response", error)
+        portal_error(context, error)
     }
 }
 
@@ -265,12 +268,13 @@ impl PortalSession {
     /// # Errors
     ///
     /// Returns `Portal` when the D-Bus or portal call fails (no
-    /// portal on this machine, dialog denied, selection refused, or
-    /// the portal closed the session before it started),
-    /// `SourceUnavailable` when the compositor does not offer the
-    /// requested source kind, `SourceMismatch` when the started
-    /// session returns a stream of another source kind, and
-    /// `NoStream` when the started session returns no stream.
+    /// portal on this machine, or the portal closed the session
+    /// before it started), `SelectionCancelled` when the source
+    /// picker dialog was dismissed or the backend cancelled the
+    /// request, `SourceUnavailable` when the compositor does not
+    /// offer the requested source kind, `SourceMismatch` when the
+    /// started session returns a stream of another source kind,
+    /// and `NoStream` when the started session returns no stream.
     pub fn open(source: SourceKind) -> Result<PortalSession, WaylandError> {
         let opened = portal_runtime()?.block_on(async { Self::open_async(source).await })?;
         Ok(PortalSession {
@@ -430,24 +434,10 @@ impl PortalSession {
         // and the answer is stored in the request: it must be read.
         // Dropping the request unread swallows a refused or
         // cancelled selection, and the following Start then fails on
-        // a session the portal already closed. A cancellation is
-        // portal-side: the source picker dialog was dismissed, or
-        // the compositor backend cancelled the request. The code
-        // cannot tell which, so the error says both and asserts
-        // neither.
-        selection.response().map_err(|e| {
-            if matches!(
-                e,
-                ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
-            ) {
-                WaylandError::Portal(format!(
-                    "select sources response: {}; the source picker dialog was dismissed, or the compositor backend cancelled the request",
-                    format_ashpd_error(&e)
-                ))
-            } else {
-                portal_error("select sources response", &e)
-            }
-        })?;
+        // a session the portal already closed.
+        selection
+            .response()
+            .map_err(|e| selection_response_error("select sources response", &e))?;
         eprintln!("pixelflow: portal: session {handle}: source selection complete");
         if closed_signalled(&mut closed) {
             return Err(WaylandError::Portal(format!(
@@ -477,7 +467,9 @@ impl PortalSession {
                 return Err(portal_error(&format!("start session{note}"), &error));
             }
         };
-        let streams = start.response().map_err(|e| start_response_error(&e))?;
+        let streams = start
+            .response()
+            .map_err(|e| selection_response_error("read start response", &e))?;
         // The portal can close the session while the Start response
         // is in flight, so check again before opening the PipeWire
         // remote: opening it on a closed session fails, and the
@@ -636,6 +628,72 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("start session"), "text: {text}");
         assert!(text.contains("NotFound"), "text: {text}");
+    }
+
+    #[test]
+    fn cancelled_select_sources_response_is_a_typed_cancellation() {
+        let error = ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled);
+        let mapped = selection_response_error("select sources response", &error);
+        assert!(
+            matches!(mapped, WaylandError::SelectionCancelled(_)),
+            "a cancelled selection keeps its own variant, got {mapped:?}"
+        );
+        let text = mapped.to_string();
+        assert!(text.contains("select sources response"), "text: {text}");
+        assert!(text.contains("dismissed"), "text: {text}");
+    }
+
+    #[test]
+    fn cancelled_start_response_is_a_typed_cancellation() {
+        let error = ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled);
+        let mapped = selection_response_error("read start response", &error);
+        assert!(
+            matches!(mapped, WaylandError::SelectionCancelled(_)),
+            "a cancelled start keeps its own variant, got {mapped:?}"
+        );
+        let text = mapped.to_string();
+        assert!(text.contains("read start response"), "text: {text}");
+    }
+
+    #[test]
+    fn other_response_is_a_plain_portal_error() {
+        let error = ashpd::Error::Response(ashpd::desktop::ResponseError::Other);
+        let mapped = selection_response_error("select sources response", &error);
+        assert!(
+            matches!(mapped, WaylandError::Portal(_)),
+            "a non-cancelled response stays a portal error, got {mapped:?}"
+        );
+    }
+
+    #[test]
+    fn cancelled_selection_survives_the_capture_error_mapping() {
+        use pixelflow_capture::CaptureError;
+        let error = CaptureError::from(WaylandError::SelectionCancelled(
+            "select sources response: Cancelled".to_string(),
+        ));
+        assert!(
+            matches!(error, CaptureError::SelectionCancelled(_)),
+            "the cancellation is still typed after the mapping, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn unavailable_source_survives_the_capture_error_mapping() {
+        use pixelflow_capture::CaptureError;
+        let error = CaptureError::from(WaylandError::SourceUnavailable {
+            requested: SourceKind::Window,
+            available: vec![SourceKind::Monitor],
+        });
+        assert!(
+            matches!(
+                error,
+                CaptureError::SourceUnavailable {
+                    requested: SourceKind::Window,
+                    ..
+                }
+            ),
+            "the unavailable source is still typed after the mapping, got {error:?}"
+        );
     }
 
     fn fdo_portal_error(error: ashpd::zbus::fdo::Error) -> ashpd::Error {

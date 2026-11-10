@@ -38,9 +38,14 @@ impl CaptureBackend for WaylandCapture {
     /// # Errors
     ///
     /// Returns `SessionFailed` when the portal session cannot be
-    /// created or started, `UnsupportedFormat` when the negotiated
-    /// format is not convertible, and `StreamFailed` when the
-    /// `PipeWire` stream fails to start.
+    /// created or started, `SelectionCancelled` when source
+    /// selection was cancelled, `SourceUnavailable` when the
+    /// requested source is not offered, `UnsupportedFormat` when
+    /// the negotiated format is not convertible, and
+    /// `StreamFailed` when the `PipeWire` stream fails to start.
+    /// The cancellation and the unavailable source pass through
+    /// from the portal unchanged, so the caller can tell them
+    /// apart without parsing a message.
     fn initialize(&mut self, config: &CaptureConfig) -> Result<(), CaptureError> {
         if self.portal.is_some() {
             return Err(CaptureError::SessionFailed(

@@ -25,6 +25,9 @@ pub enum WaylandError {
         /// The source kind the portal actually returned.
         actual: SourceKind,
     },
+    /// Source selection was cancelled: the picker was dismissed,
+    /// or the compositor backend cancelled the request.
+    SelectionCancelled(String),
     /// The portal started the session but returned no stream.
     NoStream,
     /// A `PipeWire` call failed. The message is the `PipeWire` error.
@@ -58,6 +61,9 @@ impl fmt::Display for WaylandError {
                     "requested {requested} capture but the portal returned a {actual} stream"
                 )
             }
+            WaylandError::SelectionCancelled(msg) => {
+                write!(f, "selection cancelled: {msg}")
+            }
             WaylandError::NoStream => write!(f, "portal returned no stream"),
             WaylandError::PipeWire(msg) => write!(f, "pipewire error: {msg}"),
             WaylandError::UnsupportedFormat(msg) => {
@@ -76,9 +82,17 @@ impl From<WaylandError> for pixelflow_capture::CaptureError {
         use pixelflow_capture::CaptureError;
         match e {
             WaylandError::Portal(msg) => CaptureError::SessionFailed(msg),
-            WaylandError::SourceUnavailable { .. }
-            | WaylandError::SourceMismatch { .. }
-            | WaylandError::NoStream => CaptureError::SessionFailed(e.to_string()),
+            WaylandError::SelectionCancelled(msg) => CaptureError::SelectionCancelled(msg),
+            WaylandError::SourceUnavailable {
+                requested,
+                available,
+            } => CaptureError::SourceUnavailable {
+                requested,
+                available,
+            },
+            WaylandError::SourceMismatch { .. } | WaylandError::NoStream => {
+                CaptureError::SessionFailed(e.to_string())
+            }
             WaylandError::PipeWire(msg) | WaylandError::InvalidFrame(msg) => {
                 CaptureError::StreamFailed(msg)
             }
