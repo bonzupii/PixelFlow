@@ -8,6 +8,14 @@ the node interface with dependency declarations, and the
 configuration model are separate Stage II work and are listed
 at the end, not settled here.
 
+Standing corrections (2026-11-10): `Frame` fields are private,
+read through accessors — the "public fields" wording in §4
+below is stale. The graph and the dependency declarations have
+since landed (§8, DONE notes); the `FrameData` enum and buffer
+pooling are still open. `docs/architecture.md` is the current
+reference for the frame model as it exists; this document is
+the design record of the decisions behind it.
+
 ## 1. Pixel ownership
 
 Frames own their bytes. A `Frame` holds a `Vec<u8>`; ownership
@@ -55,10 +63,12 @@ validate and return `FrameError` on mismatch or overflow.
 Accessors honor stride: `pixel(x, y)` and `pixel_mut(x, y)`
 index through `y * stride + x * bytes_per_pixel`, and
 `row(y)` returns the `width * bytes_per_pixel` pixel bytes of
-one row, padding excluded. Code that reads `frame.data`
-directly as if it were tight is a bug after this step; the
-accessors are the way to read pixels, and the call sites that
-read the buffer flat were migrated to them.
+one row, padding excluded. The fields are private: code reads
+pixels through the accessors or the `data()` slice, never
+through a field. Code that reads `data()` as if it were tight
+is a bug after this step; the accessors are the way to read
+pixels, and the call sites that read the buffer flat were
+migrated to them.
 
 Why stride lives on the frame instead of only at the capture
 boundary: the Wayland converter used to compact every buffer
@@ -96,8 +106,8 @@ this step.
 
 ## 4. Metadata
 
-A frame carries two metadata fields, both public like the
-other fields:
+A frame carries two metadata fields, both private like the
+other fields, read through `timestamp()` and `sequence()`:
 
 - `timestamp: std::time::Instant` — when the frame was
   captured. `Instant` is monotonic, which is what frame

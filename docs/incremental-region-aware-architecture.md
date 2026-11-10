@@ -5,10 +5,24 @@ frame differencing as a performance capability and graphic-element
 detection as a quality capability, built into the processing
 architecture rather than bolted onto any single algorithm.
 
-Status: specification only. None of this is implemented yet. The
-processing graph it describes does not exist yet either — this spec
-is written against the Stage II graph design, and the graph work
-must carry the interfaces defined here from the start.
+Status: specification, partly implemented. The processing graph
+it describes exists now (`pixelflow-core/src/graph.rs`): the
+node interface carries spatial and temporal dependency
+declarations, the executor propagates dirty sets through 16x16
+tiles with per-node tile caching (`Graph::run_incremental`),
+and the region-analysis stage exists
+(`pixelflow-processing/src/region_analysis.rs`) with the six
+classes, confidence scores, hysteresis, reclassification
+gating, user overrides, and a flicker count
+(`RegionMap::class_changes_since`). It is wired into the live
+`run` path, which analyzes each frame dirty-restricted and
+hands routes and halo invalidation to the graph. What is not
+implemented: per-branch processors — every branch routes to
+the same algorithm node, so routing changes no pixels — and
+capture damage input (no backend supplies damage; the dirty
+set is computed by comparing frames). The `FrameData` enum and
+buffer pooling are still open. Section 12 records the status
+of each implementation step.
 
 ## 1. Purpose and scope
 
@@ -83,8 +97,10 @@ pub enum TemporalDependency {
 ```
 
 A node reports both. A pure per-pixel color adjustment is
-`Local` + `Stateless`. Contour is `Neighborhood` (its radius is
-the follower's reach) + `Stateless`. A global palette analysis is
+`Local` + `Stateless`. Contour declares `Global`: its labelset
+reads a 3x3 neighborhood, but the edge follower's runs and
+gates span whole scanlines, so no small radius bounds the input
+area one output pixel depends on. A global palette analysis is
 `Global` + `Stateless`. A temporal denoiser is `Local` +
 `Stateful` with its own history rule.
 
@@ -319,12 +335,27 @@ most appropriate processing is needed. That is the whole point.
    propagation, per-node tile caching. This has measurable
    performance benefits and influences the processing
    architecture, so it comes first and lands in Stage II/IV.
+   LANDED: `Graph::run_incremental`, 16x16 tiles, dirty
+   propagation, per-node tile caching (`ae3f759`). The live
+   `run` path does not use it: with a single Global node it
+   would diff the whole frame and clone the output for output
+   identical to the whole-frame run.
 2. **Region analysis.** Segmentation, feature extraction,
    confidence scoring, classification metadata. Stage III.
+   LANDED: the region-analysis module with six classes,
+   confidence scores, hysteresis, reclassification gating, and
+   tile overrides, wired into the graph and the live run path
+   (`28d78b3`, `c6accd0`).
 3. **Content-aware routing.** Different routines per region,
-   with the general-path fallback. Stage III.
+   with the general-path fallback. Stage III. OPEN: branches
+   are wired (text, sprite, general) but all route to the same
+   algorithm node; no per-branch processors exist yet, so
+   routing changes no pixels.
 4. **Temporal stability.** Hysteresis, reclassification gating,
-   flicker measurement. Stages III/IV.
+   flicker measurement. Stages III/IV. PARTLY LANDED:
+   hysteresis and reclassification gating live in the analyzer,
+   and the flicker count is `RegionMap::class_changes_since`;
+   no per-frame flicker reporting exists in the live path.
 
 The dependency declaration (Section 3) is not step 1 — it is a
 prerequisite to all of it, and it goes into the node interface

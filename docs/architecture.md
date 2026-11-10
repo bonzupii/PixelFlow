@@ -4,8 +4,11 @@
 
 - `pixelflow-core`: frame, pixel format, `Processor` trait. No
   platform code, no I/O, no dependencies.
-- `pixelflow-processing`: algorithms `contour` and `nearest`.
-  Depends on core only.
+- `pixelflow-processing`: algorithms `contour`, `nearest`, and
+  `bilinear`; the algorithm registry. Depends on core only.
+- `pixelflow-gpu`: GPU context, GPU-resident images, the WGSL
+  nearest-neighbour compute node (`nearest-gpu`). Depends on core
+  and processing.
 - `pixelflow-capture`: capture backend trait, source
   configuration, typed errors. Depends on core only.
 - `pixelflow-wayland`: XDG Desktop Portal ScreenCast plus a
@@ -27,7 +30,8 @@ input forwarding does not exist yet.
   channel count come from the format, never from a magic number.
 - `Frame`: width, height, format, row stride, capture
   metadata, and an owned row-major data buffer. All fields are
-  public. The buffer is `height * stride` bytes long, and the
+  private, read through accessors (`width()`, `height()`,
+  `format()`, `stride()`, `timestamp()`, `sequence()`, `data()`). The buffer is `height * stride` bytes long, and the
   stride is at least `width * format.bytes_per_pixel()`; tight
   packing is the special case where the stride equals one row.
   `Frame::new` builds a tight frame and `Frame::new_with_stride`
@@ -134,47 +138,61 @@ window instead, and `f` toggles between the two while the
 window runs. Frames are drawn letterboxed to preserve aspect
 ratio (`fit_rect` in `layout.rs`). Vsync is `AutoVsync` where
 the surface offers it, `Fifo` otherwise, with at most 2 frames
-of latency. Frames arrive over a bounded 1-frame channel from
-the processing thread; when presentation falls behind, the
-oldest unprocessed frame is dropped and the freshest is kept.
+of latency. Frames arrive through a replaceable frame slot
+shared with the processing thread: a newer frame replaces one
+still waiting in the slot, so the presented frame is always the
+freshest; replaced frames are counted, not hidden. The
+processing thread wakes the presentation loop through an
+event-loop proxy each time it publishes, so the loop leaves
+`ControlFlow::Wait` as soon as a frame is ready.
 
 ## CLI
 
 `pixelflow-cli` is a thin shell: it parses arguments with clap,
 loads PNGs with the `png` crate (`src/png_io.rs`, the only place
 that knows about the PNG format), calls a `Processor`, and writes
-the result back. Four commands:
+the result back. Five commands:
 
 - `upscale <in.png> <out.png>`: `--scale 2|4` (default 4),
-  `--algorithm contour|nearest` (default contour).
+  `--algorithm contour|nearest|bilinear|nearest-gpu` (default
+  contour).
 - `run <program> [args]`: launches the target, captures the
   source the user picks in the compositor dialog, processes
-  every frame through the processing graph (one contour node,
-  run whole-frame under its Global spatial dependency),
-  presents it. `--capture
-  window|monitor` (default window), `--scale 2|4` (default 4),
-  `--windowed` for a preview instead of fullscreen (fullscreen
-  is the default; `--fullscreen` and `--windowed` conflict).
-  Arguments after `--` go to the target. `run` always uses
-  contour; it takes no `--algorithm` flag. The launcher waits
-  2 seconds for the target to start, then opens the portal
+  every frame through the processing graph, presents it. The
+  live graph is built from the selected algorithm's registry
+  nodes; Contour's node declares the Global spatial dependency,
+  so the graph runs it whole-frame.
+  `--capture window|monitor` (default window), `--scale 2|4`
+  (default 4), `--algorithm` (default contour; `nearest`
+  resolves to the `nearest-gpu` node when a GPU adapter is
+  present, and an explicit `nearest-gpu` request with no adapter
+  is an error), `--windowed` for a preview instead of fullscreen
+  (fullscreen is the default; `--fullscreen` and `--windowed`
+  conflict). Arguments after `--` go to the target. The launcher
+  waits 2 seconds for the target to start, then opens the portal
   session; the wait is startup grace, not detection, and
   PixelFlow never verifies that the picked source belongs to
-  the launched process. A target that exits before capture
-  starts is an error, and the child is killed on shutdown.
+  the launched process. If window capture fails to start, the
+  run tries monitor capture once on the same backend and
+  reports the effective source. A target that exits before
+  capture starts is an error, and the child is killed on
+  shutdown.
 - `backends`: lists the capture backend (Wayland), the
-  presentation backend (wgpu), and the two algorithms with
-  their scales.
-- `info`: version, OS, architecture, CPU count, and the same
-  backend and algorithm list. The display is probed when the
+  presentation backend (wgpu), and the registered algorithms
+  with their scales.
+- `info`: version, OS, architecture, CPU count, and the
+  registered algorithm ids. The display is probed when the
   presentation window opens, not before.
+- `algorithms [name]`: lists every registered algorithm, or
+  prints one algorithm's full capabilities from its registry
+  descriptor.
 
 ## Testing
 
 - Unit tests live with the code they test: frame
   construction, the letterbox math, format conversion, the
   CLI argument parsing, the portal and PipeWire error paths.
-- `pixelflow-processing/tests/synthetic.rs` (16 tests) is the
+- `pixelflow-processing/tests/synthetic.rs` (17 tests) is the
   deterministic suite: every input image is generated in code,
   no PNG files, nothing copyrighted, so it runs on a clean
   checkout. It covers single-pixel and very small images, flat
@@ -195,12 +213,15 @@ the result back. Four commands:
   on a 2x1 frame built in code and needs no fixtures. Limits:
   max abs diff <= 1, except mario (at most 10 pixels differing
   by more than 1, max diff 34), for the float-tie reason
-  recorded in the README. Fixtures are local-only: the test
+  recorded in the Contour section above. Fixtures are local-only: the test
   skips when they are absent, so the suite stays green on a
   clean checkout.
-- Counts: 64 tests in total (8 CLI, 13 core, 7 presentation, 2
-  processing unit tests, 3 regression, 14 Wayland, 17
-  synthetic). 62 run anywhere with no fixtures.
+- Counts: 217 tests in total at the `d2e057e` baseline (30 CLI,
+  50 core — 28 unit plus 22 graph — 22 GPU, 8 presentation, 76
+  processing — 6 algorithm unit, 17 synthetic, 3 regression, 6
+  budget, 6 graph nodes, 26 region analysis, 12 registry — 31
+  Wayland — 30 unit plus 1 mock-portal). 215 run anywhere with
+  no fixtures; the 2 fixture-based regression tests skip.
 - CI (`.github/workflows/ci.yml`, on every push to main and
   every pull request) runs three jobs: `cargo fmt --check`,
   the clippy gate (`ci/clippy-gate.sh`), and `cargo build

@@ -35,7 +35,9 @@ order.
 3. Open a portal ScreenCast session over D-Bus with ashpd.
    PixelFlow asks for the source types the compositor offers and
    requests window capture, or monitor capture when the caller
-   asked for it with `--capture monitor`. The session start call
+   asked for it with `--capture monitor`. If window capture
+   fails to start, the run tries monitor capture once on the
+   same backend and reports the effective source. The session start call
    blocks until the user answers the compositor dialog.
 4. Take the PipeWire remote file descriptor from the session and
    connect a PipeWire stream to the selected node id. The portal
@@ -106,18 +108,19 @@ the processed copy.
 The build machine has no Wayland desktop, no compositor, no
 portal, no PipeWire daemon, and no gtk-slashem. What was verified
 there: the full workspace builds (`cargo build --release` clean)
-and passes its tests (`cargo test --release`: 48 passed, 0
-failed: 8 CLI, 3 core, 5 presentation, 1 processing unit test, 3
-regression, 12 Wayland, 16 synthetic). The format conversion and stride
-handling pass unit tests, the letterbox math passes unit tests,
-the CLI parses the `run` command, and the portal and PipeWire
-error paths fail fast with typed errors instead of hanging or
-panicking. The CLI paths were exercised live: `upscale` on the
-Mario fixture produces 1024x896 in 0.4 s with max diff 34 over 6
-pixels, matching the regression table; `run /bin/true` exits 1
-with "exited before capture started"; `run --windowed /bin/sleep
-30` exits 1 with a D-Bus connection error from the missing
-portal, and the child is killed with no stray process left.
+and passes its tests (`cargo test --workspace`: 217 passed, 0
+failed at the `d2e057e` baseline, fixtures exercised, including
+30 Wayland unit tests and 1 mock-portal test). The format
+conversion and stride handling pass unit tests, the letterbox
+math passes unit tests, the CLI parses the `run` command, and
+the portal and PipeWire error paths fail fast with typed errors
+instead of hanging or panicking. The CLI paths were exercised
+live: `upscale` on the Mario fixture produces 1024x896 in 0.4 s
+with max diff 34 over 6 pixels, matching the regression table;
+`run /bin/true` exits 1 with "exited before capture started";
+`run --windowed /bin/sleep 30` exits 1 with a D-Bus connection
+error from the missing portal, and the child is killed with no
+stray process left.
 
 What was not verified there, and needs a Wayland desktop:
 the end-to-end wrapper. `pixelflow run gtk-slashem` on a Wayland
@@ -127,3 +130,19 @@ PixelFlow receives the stream, contour processes frames, and a
 separate PixelFlow window shows the result. A mocked success is
 not a live capture, so this document claims nothing about that
 run until it happens on a desktop.
+
+What is known from the owner's machine so far: window capture
+still fails at SelectSources (the wlr backend's chooser cancels
+the request, surfacing as portal Response code 1), and monitor
+fallback starts (selection complete, PipeWire connected) but no
+frames reach presentation — no output window, the game stays at
+native resolution. The frame-delivery verdict (`d2e057e`): no
+defect exists in the frame transport — a synthetic-source
+reproduction test passes on the base code — and the stall is
+Contour cost (151.9 s per 1920x1080 frame at 4x in a debug
+build, 9.1 s in release). The missing presentation window is
+still unexplained in-process, and still needs the owner's
+machine. Control run: `pixelflow run <game> --capture monitor
+--scale 2 --algorithm nearest --windowed` — expect a window
+within ~1 s; if no window appears there either, the defect is
+presenter/adapter-side, not capture.

@@ -4,7 +4,13 @@ Benchmarks and memory measurements for the Contour algorithm.
 Two sets of numbers live here: the pre-redesign baseline,
 measured with `pixelflow-bench` at commit `adbbba2`, and the
 post-redesign measurements, re-measured 2026-11-10 at `dcb4de9`
-after the strip redesign and incremental execution landed. Every number below is measured; the model
+after the strip redesign and incremental execution landed. The
+current figure for 1920x1080 at 4x is the post-redesign one:
+8.0 s per frame in release on the synthetic bench frame; the
+18.8 s figure in the pre-redesign table is the baseline it
+replaced, kept for comparison. A separate live-path
+measurement on a uniform frame is in its own section below.
+Every number below is measured; the model
 section says where the working-set model stands against the
 measurements.
 
@@ -297,6 +303,31 @@ safe direction for a budget check. Regression numbers stayed
 identical through the redesign: ct/eb/ct2/zelda/ctnew max abs
 diff 1 with 0 pixels over 1, mario max 34 over exactly
 6 pixels.
+
+## Live-path measurement on a uniform frame (2026-11-10)
+
+Separate from the bench tables above: the frame-delivery work
+measured Contour on a uniform 1920x1080 frame at 4x through
+the live path, coordinator-measured, byte-identical output in
+both profiles:
+
+| profile | frame | time per frame |
+| --- | --- | --- |
+| debug | uniform 1920x1080 @4x | 151.9 s |
+| release | uniform 1920x1080 @4x | 9.1 s |
+
+The 9.1 s release figure sits next to the bench's 8.0 s at the
+same size and scale: the bench frame is game-art-shaped
+(synthetic, with an edge, a diagonal band, a checkerboard
+block, and a gradient strip), the live-path frame is uniform,
+and the two shapes cost differently. State the frame shape
+with the number; neither replaces the other. The debug figure
+is the one that matters for live runs built without
+`--release`: for any observation under ~2.5 minutes the debug
+run looks exactly like a stalled transport, which is why the
+live stall was localized to Contour cost and not to the frame
+path. At either profile, Contour @4x on 1080p input is not a
+live algorithm: 9.1 s per frame is 0.11 fps in release.
 
 ## What the numbers say
 

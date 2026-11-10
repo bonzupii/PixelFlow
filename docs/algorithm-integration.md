@@ -100,13 +100,17 @@ graph is the common case, not a constraint.
 ### Execution backends
 
 `ExecutionBackend` has two variants: `Cpu` and `Gpu`. The CPU
-side exists. The GPU side is a declaration for now: `GpuResource`
-in `core/frame.rs` is an opaque stub, the presenter uses wgpu
-for display only, and no GPU compute exists yet. A GPU worker
-is defining the same concept in its crate; the coordinator
-reconciles the two at integration. An algorithm lists every
-backend it can run on; a caller that asks for a backend the
-algorithm does not list gets `AlgorithmError::UnsupportedBackend`.
+side exists. The GPU side exists as one real node:
+`pixelflow-gpu` provides `GpuNearestNode`, a WGSL
+nearest-neighbour compute node registered as `nearest-gpu`
+(`aea977c`), and the live `run` path resolves `nearest` to it
+when an adapter is present. The WGSL shader is naga-validated,
+but no GPU compute has run against a device yet: this VM has
+no wgpu adapter, so the parity check has never executed, and a
+device run on hardware with an adapter is required before any
+GPU claim is made. An algorithm lists every backend it can run
+on; a caller that asks for a backend the algorithm does not
+list gets `AlgorithmError::UnsupportedBackend`.
 
 ### Errors
 
