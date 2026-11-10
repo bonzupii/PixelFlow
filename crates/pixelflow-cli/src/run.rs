@@ -5,7 +5,7 @@
 //! The work splits across two threads. The processing thread owns the
 //! capture backend, the child process, and the processing graph: it
 //! pulls frames, region-analyzes each one restricted to the tiles whose pixels changed, hands the
-//! routes to the graph, runs each through the graph's single contour node,
+//! routes to the graph, runs each through the graph's algorithm node,
 //! and publishes the newest to a replaceable frame slot. A
 //! newer frame replaces one still waiting in the slot, so the
 //! presentation window always draws the freshest frame and latency
@@ -27,10 +27,11 @@
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
 use pixelflow_core::{
-    DirtySet, Frame, FrameSlot, Graph, GraphBuilder, GraphError, PixelFormat, Source, TileGrid,
+    AlgorithmConfig, DirtySet, Frame, FrameSlot, Graph, GraphBuilder, GraphError, Source, TileGrid,
     TileRouting,
 };
 use pixelflow_present::{PresentLoop, PresentUserEvent};
+use pixelflow_processing::AlgorithmRegistry;
 use pixelflow_processing::region_analysis::{RegionAnalyzer, RegionMap, Route, RoutingProfile};
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
@@ -51,6 +52,8 @@ pub struct RunOptions {
     pub source: SourceKind,
     /// Integer scale factor, 2 or 4.
     pub scale: u32,
+    /// Processing algorithm id, from the registry.
+    pub algorithm: String,
     /// Windowed preview instead of fullscreen.
     pub windowed: bool,
 }
@@ -60,17 +63,19 @@ pub struct RunOptions {
 ///
 /// # Errors
 ///
-/// Returns a message when the target cannot launch, the scale is not
-/// supported, the portal session cannot open, capture fails, or the
-/// presentation window cannot start.
+/// Returns a message when the algorithm is unknown, the scale is
+/// not supported, the target cannot launch, the portal session
+/// cannot open, capture fails, or the presentation window cannot
+/// start.
 pub fn run(opts: RunOptions) -> Result<(), String> {
-    let processor = crate::contour_from_env();
-    if !processor.supported_scales().contains(&opts.scale) {
+    let registry = AlgorithmRegistry::builtin();
+    let descriptor = registry
+        .descriptor(&opts.algorithm)
+        .map_err(|e| e.to_string())?;
+    if !descriptor.supports_scale(opts.scale) {
         return Err(format!(
             "scale {} is not supported by {}; supported scales: {:?}",
-            opts.scale,
-            processor.name(),
-            processor.supported_scales()
+            opts.scale, opts.algorithm, descriptor.supported_scales
         ));
     }
     let mut launcher = Launcher::spawn(&opts.program, &opts.args)?;
@@ -93,6 +98,7 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     let processing_exit = exit.clone();
     let scale = opts.scale;
     let program = opts.program.clone();
+    let algorithm = opts.algorithm.clone();
     // Build the presentation loop before the worker starts, so the
     // worker has the proxy it wakes the loop with. When no display
     // server exists this fails here, before any frame is produced:
@@ -117,6 +123,7 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         run_processing(
             &mut backend,
             &mut launcher,
+            &algorithm,
             scale,
             slot,
             move || proxy.send_event(PresentUserEvent::FrameReady).is_ok(),
@@ -140,36 +147,76 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     }
 }
 
-/// Build the live processing graph: one Contour node fed by the
-/// graph input, exposing the node's output. The node declares
-/// the Global spatial dependency, so the graph runs it
-/// whole-frame; there is no tile-level incremental claim for
-/// it. The text and sprite branches and the general path all
-/// route to the contour node: no per-branch processors exist
+/// Build the live processing graph: the registry algorithm's
+/// nodes fed by the graph input, exposing the last stage's
+/// output. The nodes come from the registry, so the live path
+/// runs whichever algorithm the user selected — Contour's node
+/// declares the Global spatial dependency, so the graph runs
+/// it whole-frame; there is no tile-level incremental claim
+/// for it. The text and sprite branches and the general path
+/// all route to the first stage: no per-branch processors exist
 /// yet, so routing changes no pixels. Built fresh in the
 /// processing thread, which owns the graph exactly as it owns
 /// the capture backend and the child process.
 ///
 /// # Errors
 ///
-/// Returns [`GraphError`] when the fixed wiring fails to
-/// validate, which means a programming error in this function.
-fn build_contour_graph(scale: u32) -> Result<Graph, GraphError> {
+/// Returns [`GraphError`] when the wiring fails to validate,
+/// which means a programming error in this function or an
+/// algorithm whose nodes do not wire linearly.
+fn build_algorithm_graph(
+    algorithm: &str,
+    config: &AlgorithmConfig,
+    scale: u32,
+) -> Result<Graph, GraphError> {
+    let registry = AlgorithmRegistry::builtin();
+    let descriptor = registry
+        .descriptor(algorithm)
+        .map_err(|error| GraphError::Internal(error.to_string()))?;
+    let nodes = registry
+        .create_nodes(algorithm, config, scale)
+        .map_err(|error| GraphError::Internal(error.to_string()))?;
+    if nodes.len() != descriptor.stages.len() || nodes.is_empty() {
+        return Err(GraphError::Internal(format!(
+            "{algorithm} declares {} stages but built {} nodes",
+            descriptor.stages.len(),
+            nodes.len()
+        )));
+    }
+    let input_format = descriptor
+        .input_formats
+        .first()
+        .copied()
+        .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no input format")))?;
+    let first = descriptor
+        .stages
+        .first()
+        .copied()
+        .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no stages")))?;
+    let last = descriptor
+        .stages
+        .last()
+        .copied()
+        .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no stages")))?;
     let mut builder = GraphBuilder::new();
     // `build` takes the builder by value, so the chained
     // `&mut Self` is moved out with `take`, not discarded:
     // the same shape as the graph tests.
-    std::mem::take(
-        builder
-            .add_input("in", PixelFormat::Rgb8)
-            .add_node("contour", crate::contour_node_from_env(scale))
-            .connect(Source::input("in"), "contour", "in")
-            .route_branch("text", "contour")
-            .route_branch("sprite", "contour")
-            .route_general("contour")
-            .add_output("out", "contour", "out"),
-    )
-    .build()
+    let mut current = builder.add_input("in", input_format);
+    for (stage, node) in descriptor.stages.iter().zip(nodes) {
+        current = current.add_node(stage, node);
+    }
+    current = current.connect(Source::input("in"), first, "in");
+    for pair in descriptor.stages.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        current = current.connect(Source::node(from, "out"), to, "in");
+    }
+    current = current
+        .route_branch("text", first)
+        .route_branch("sprite", first)
+        .route_general(first)
+        .add_output("out", last, "out");
+    std::mem::take(current).build()
 }
 
 /// Per-frame region state for the live path: the analyzer, the
@@ -258,7 +305,7 @@ impl FrameRouting {
 /// # Errors
 ///
 /// Returns [`GraphError`] when the frame is not RGB8 or the
-/// contour node fails.
+/// algorithm node fails.
 fn process_frame(
     graph: &mut Graph,
     frame: Frame,
@@ -269,7 +316,7 @@ fn process_frame(
     match outputs.pop() {
         Some((_, frame)) => Ok(frame),
         None => Err(GraphError::Internal(
-            "contour graph produced no output".to_string(),
+            "algorithm graph produced no output".to_string(),
         )),
     }
 }
@@ -283,13 +330,16 @@ fn process_frame(
 fn run_processing(
     backend: &mut WaylandCapture,
     launcher: &mut Launcher,
+    algorithm: &str,
     scale: u32,
     slot: Arc<FrameSlot>,
     wake: impl Fn() -> bool,
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut result: Result<(), String> = Ok(());
-    match build_contour_graph(scale) {
+    let registry = AlgorithmRegistry::builtin();
+    let config = crate::algorithm_config(&registry, algorithm);
+    match build_algorithm_graph(algorithm, &config, scale) {
         Ok(mut graph) => {
             let mut routing = FrameRouting::default();
             while !exit.load(Ordering::Relaxed) {
@@ -353,7 +403,7 @@ fn run_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pixelflow_core::Processor;
+    use pixelflow_core::{PixelFormat, Processor};
     use pixelflow_processing::Contour;
     use pixelflow_processing::region_analysis::ContentClass;
 
@@ -425,6 +475,7 @@ mod tests {
             args: vec![],
             source: SourceKind::Window,
             scale: 3,
+            algorithm: "contour".to_string(),
             windowed: true,
         });
         assert!(result.is_err(), "expected a scale error");
@@ -435,12 +486,30 @@ mod tests {
     }
 
     #[test]
+    fn unknown_algorithm_fails_before_launching() {
+        let result = run(RunOptions {
+            program: "pixelflow-definitely-not-a-program".to_string(),
+            args: vec![],
+            source: SourceKind::Window,
+            scale: 4,
+            algorithm: "nope".to_string(),
+            windowed: true,
+        });
+        assert!(result.is_err(), "expected an unknown-algorithm error");
+        assert!(
+            matches!(&result, Err(e) if e.contains("unknown algorithm") && e.contains("contour")),
+            "the error lists the registered algorithms, got {result:?}"
+        );
+    }
+
+    #[test]
     fn target_that_exits_at_once_is_an_error() {
         let result = run(RunOptions {
             program: "/bin/true".to_string(),
             args: vec![],
             source: SourceKind::Window,
             scale: 4,
+            algorithm: "contour".to_string(),
             windowed: true,
         });
         assert!(result.is_err(), "expected an error for an exited target");
@@ -467,7 +536,8 @@ mod tests {
         }
         let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
         let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
+            .map_err(|e| e.to_string())?;
         let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
             .map_err(|e| e.to_string())?;
         assert_eq!((processed.width(), processed.height()), (8, 8));
@@ -477,10 +547,38 @@ mod tests {
     }
 
     #[test]
+    fn bilinear_graph_matches_direct_processor_output() -> Result<(), String> {
+        use pixelflow_processing::Bilinear;
+        let mut data = Vec::with_capacity(4 * 4 * 3);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v: u8 = if x + y < 3 {
+                    20
+                } else if x + y < 5 {
+                    128
+                } else {
+                    240
+                };
+                data.extend_from_slice(&[v, v, v]);
+            }
+        }
+        let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
+        let direct = Bilinear.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graph = build_algorithm_graph("bilinear", &AlgorithmConfig::new(), 2)
+            .map_err(|e| e.to_string())?;
+        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
+            .map_err(|e| e.to_string())?;
+        assert_eq!((processed.width(), processed.height()), (8, 8));
+        assert_eq!(processed.data(), direct.data());
+        Ok(())
+    }
+
+    #[test]
     fn routed_frame_resolves_all_routes_to_contour() -> Result<(), String> {
         let frame = text_and_flat_frame()?;
         let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
+            .map_err(|e| e.to_string())?;
         let mut routing = FrameRouting::default();
         let processed =
             process_frame(&mut graph, frame, &mut routing).map_err(|e| e.to_string())?;
@@ -505,7 +603,8 @@ mod tests {
 
     #[test]
     fn second_frame_reuses_prior_classes_and_halo_invalidates() -> Result<(), String> {
-        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
+            .map_err(|e| e.to_string())?;
         let mut routing = FrameRouting::default();
         let first = three_flat_frame()?;
         process_frame(&mut graph, first, &mut routing).map_err(|e| e.to_string())?;
