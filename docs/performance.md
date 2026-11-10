@@ -3,8 +3,8 @@
 Benchmarks and memory measurements for the Contour algorithm.
 Two sets of numbers live here: the pre-redesign baseline,
 measured with `pixelflow-bench` at commit `adbbba2`, and the
-post-redesign measurements, taken 2026-11-10 after the strip
-redesign landed. Every number below is measured; the model
+post-redesign measurements, re-measured 2026-11-10 at `dcb4de9`
+after the strip redesign and incremental execution landed. Every number below is measured; the model
 section says where the working-set model stands against the
 measurements.
 
@@ -25,7 +25,13 @@ subprocess `VmHWM` from `/proc/self/status`, so each case
 reports its own peak, including the process baseline (roughly
 15 MiB, negligible at the sizes that matter). The benchmark
 binary is `pixelflow-bench` in
-`crates/pixelflow-cli/src/bin/bench.rs`.
+`crates/pixelflow-cli/src/bin/bench.rs`. Toolchain: rustc
+1.99.1, default release profile (opt-level 3). The VM exposes
+4 CPUs (`nproc`) against a 1.5 shared-CPU quota and a 6 GiB
+memory limit. The bench reports the median of 5 timed runs
+after 1 warmup; it does not print the per-run distribution and
+has no per-stage timing, so stage-level time is not measured
+here.
 
 ## Pre-redesign baseline (measured, `adbbba2`)
 
@@ -223,59 +229,69 @@ Same bench, same VM, after the strip redesign. Follower on:
 
 | input | scale | output pixels | median ms | fps | peak RSS MiB |
 | --- | --- | --- | --- | --- | --- |
-| 256x224 | 2 | 229,376 | 91.2 | 10.97 | 28 |
-| 256x224 | 4 | 917,504 | 250.3 | 4.00 | 98 |
-| 854x480 | 2 | 1,639,680 | 550.6 | 1.82 | 115 |
-| 854x480 | 4 | 6,558,720 | 2,150.7 | 0.46 | 352 |
-| 1280x720 | 2 | 3,686,400 | 1,425.3 | 0.70 | 171 |
-| 1280x720 | 4 | 14,745,600 | 5,155.3 | 0.19 | 573 |
-| 1920x1080 | 2 | 8,294,400 | 3,075.1 | 0.33 | 338 |
-| 1920x1080 | 4 | 33,177,600 | 11,015.9 | 0.09 | 1,049 |
-| 3840x2160 | 2 | 33,177,600 | 13,477.0 | 0.07 | 729 |
-| 3840x2160 | 4 | 132,710,400 | 52,127.5 | 0.02 | 2,380 |
+| 256x224 | 2 | 229,376 | 80.5 | 12.42 | 28 |
+| 256x224 | 4 | 917,504 | 189.1 | 5.29 | 100 |
+| 854x480 | 2 | 1,639,680 | 414.3 | 2.41 | 115 |
+| 854x480 | 4 | 6,558,720 | 1,471.2 | 0.68 | 362 |
+| 1280x720 | 2 | 3,686,400 | 1,079.9 | 0.93 | 171 |
+| 1280x720 | 4 | 14,745,600 | 3,493.5 | 0.29 | 593 |
+| 1920x1080 | 2 | 8,294,400 | 2,293.8 | 0.44 | 338 |
+| 1920x1080 | 4 | 33,177,600 | 8,004.8 | 0.12 | 1,060 |
+| 3840x2160 | 2 | 33,177,600 | 10,228.6 | 0.10 | 735 |
+| 3840x2160 | 4 | 132,710,400 | 37,570.9 | 0.03 | 2,381 |
 
 Follower off (`CONTOUR_NO_FOLLOW=1`):
 
 | input | scale | output pixels | median ms | fps | peak RSS MiB |
 | --- | --- | --- | --- | --- | --- |
-| 256x224 | 2 | 229,376 | 90.5 | 11.05 | 27 |
-| 256x224 | 4 | 917,504 | 226.0 | 4.42 | 98 |
-| 854x480 | 2 | 1,639,680 | 556.9 | 1.80 | 112 |
-| 854x480 | 4 | 6,558,720 | 2,046.3 | 0.49 | 339 |
-| 1280x720 | 2 | 3,686,400 | 1,504.6 | 0.66 | 154 |
-| 1280x720 | 4 | 14,745,600 | 4,834.0 | 0.21 | 580 |
-| 1920x1080 | 2 | 8,294,400 | 2,931.8 | 0.34 | 315 |
-| 1920x1080 | 4 | 33,177,600 | 10,857.2 | 0.09 | 1,052 |
-| 3840x2160 | 2 | 33,177,600 | 12,023.8 | 0.08 | 744 |
-| 3840x2160 | 4 | 132,710,400 | 51,314.8 | 0.02 | 2,274 |
+| 256x224 | 2 | 229,376 | 84.8 | 11.79 | 28 |
+| 256x224 | 4 | 917,504 | 203.3 | 4.92 | 98 |
+| 854x480 | 2 | 1,639,680 | 407.3 | 2.46 | 112 |
+| 854x480 | 4 | 6,558,720 | 1,411.9 | 0.71 | 357 |
+| 1280x720 | 2 | 3,686,400 | 1,017.4 | 0.98 | 166 |
+| 1280x720 | 4 | 14,745,600 | 3,533.6 | 0.28 | 595 |
+| 1920x1080 | 2 | 8,294,400 | 2,271.8 | 0.44 | 320 |
+| 1920x1080 | 4 | 33,177,600 | 8,171.3 | 0.12 | 1,011 |
+| 3840x2160 | 2 | 33,177,600 | 9,571.5 | 0.10 | 709 |
+| 3840x2160 | 4 | 132,710,400 | 36,136.0 | 0.03 | 2,274 |
 
-Time is still linear in output pixels, at 0.27 to 0.41
+Run-to-run variance: these tables replace an earlier same-day
+run recorded in `9ad6e45`, whose times run 13% to 47% higher
+across the cases (1080p at 4x: 11,016 ms then, 8,005 ms
+now) with peak RSS within 3%. Times on this shared-CPU VM
+vary between runs even with no other cargo process running on
+the VM at the time; treat the times as approximate and the
+memory figures as stable.
+
+Time is still linear in output pixels, at 0.21 to 0.35
 microseconds per output pixel across the cases, typically
-about 0.33 to 0.41 at the large sizes — down from about 0.55
-before the redesign, a 1.3x to 1.7x speedup across the cases
-(1080p at 4x: 18,782 ms to 11,016 ms, 1.7x). The labelset restructure, the
+about 0.24 to 0.31 at the large sizes — down from about 0.55
+before the redesign, a 1.5x to 2.4x speedup across the cases
+(1080p at 4x: 18,782 ms to 8,005 ms, 2.3x). The labelset restructure, the
 removed duplicate blur, the fused hard-light stage, and strip
 parallelism across bands each contributed; the bench does not
 separate them. No measured case is within a factor of 5 of
-real time: the smallest case, 256x224 at 2x (91 ms), is about
+real time: the smallest case, 256x224 at 2x (80.5 ms), is about
 5 times over the 16.7 ms frame budget.
 
-The edge follower is still not the bottleneck: follower-on
-minus follower-off is 159 ms at 1080p 4x (1.4% of frame
-time) and 813 ms at 4K 4x (1.6%). The per-pixel stages in
-`combined` dominate, as before.
+The edge follower's cost is within run-to-run noise:
+follower-on minus follower-off ranges from −167 ms to +1,435 ms
+across the cases (−7.5% to +6.4% of frame time), with the sign
+flipping between sizes. It is not the bottleneck on any
+measured case. The per-pixel stages in `combined` dominate, as
+before.
 
 Memory no longer follows the old 84 bytes per output pixel
-slope. Peak RSS at 1080p 4x is 1,049 MiB, down from 2,759
-MiB (2.6x); at 4K 4x it is 2,380 MiB, where the old slope
+slope. Peak RSS at 1080p 4x is 1,060 MiB, down from 2,759
+MiB (2.6x); at 4K 4x it is 2,381 MiB, where the old slope
 put it at about 10.38 GiB (4K at 4x was never run before the
 redesign: it exceeds this VM's 6 GiB).
 
 Model against measurement (4 worker threads): the corrected
 working-set model puts 1080p at 2x at about 359 MiB against
-338 measured, 1080p at 4x at about 1,417 MiB against 1,049,
-4K at 2x at about 1,030 MiB against 729, and 4K at 4x at
-about 3,440 MiB against 2,380. The model overestimates by
+338 measured, 1080p at 4x at about 1,417 MiB against 1,060,
+4K at 2x at about 1,030 MiB against 735, and 4K at 4x at
+about 3,440 MiB against 2,381. The model overestimates by
 6% to 45%: it is a conservative upper bound, which is the
 safe direction for a budget check. Regression numbers stayed
 identical through the redesign: ct/eb/ct2/zelda/ctnew max abs
@@ -287,10 +303,10 @@ diff 1 with 0 pixels over 1, mario max 34 over exactly
 Memory no longer scales as 84 bytes per output pixel with
 several full-frame f32 images live at once; it scales as about
 19 bytes per output pixel plus one strip working set per
-worker thread. 1080p at 4x fits in 1,049 MiB where it took
-2,759 MiB, and 4K at 4x fits in 2,380 MiB where the old slope
-put it at about 10.38 GiB. Speed improved 1.3x to 1.7x, to
-about 0.33 microseconds per output pixel at the large sizes,
+worker thread. 1080p at 4x fits in 1,060 MiB where it took
+2,759 MiB, and 4K at 4x fits in 2,381 MiB where the old slope
+put it at about 10.38 GiB. Speed improved 1.5x to 2.4x, to
+about 0.24 to 0.31 microseconds per output pixel at the large sizes,
 but it is still the open problem: the per-pixel rate has to
 come down by roughly two orders of magnitude for real-time
 use, and the redesign does not change the order of magnitude
