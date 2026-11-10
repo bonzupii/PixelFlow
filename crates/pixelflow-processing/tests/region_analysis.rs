@@ -15,9 +15,10 @@
 //! under test.
 
 use pixelflow_core::{DirtySet, Frame, PixelFormat, TileGrid};
+use pixelflow_processing::AlgorithmRegistry;
 use pixelflow_processing::region_analysis::{
-    ContentClass, RegionAnalyzer, RegionMap, Route, RoutingProfile, TileClassification,
-    TileFeatures, TileOverride,
+    ContentClass, ROUTING_TABLE, RegionAnalyzer, RegionMap, Route, RoutingProfile,
+    TileClassification, TileFeatures, TileOverride, resolve_algorithm,
 };
 
 /// Build an RGB8 frame from a per-pixel function. `pixel`
@@ -465,26 +466,197 @@ fn weak_evidence_is_unknown() {
 }
 
 #[test]
-fn default_routing_sends_text_and_sprite_to_branches() -> Result<(), String> {
-    // Left tile text, right tile flat, in one 32x16 frame.
-    let frame = rgb_frame(32, 16, |x, y| {
-        if x < 16 {
-            let ink = (x == 1 && (2..11).contains(&y))
-                || (x == 5 && (2..8).contains(&y))
-                || (x == 9 && (5..14).contains(&y))
-                || (x == 13 && (4..15).contains(&y));
-            if ink { [20, 20, 20] } else { [240, 240, 240] }
+fn default_routing_sends_each_class_to_its_branch() -> Result<(), String> {
+    // Six tiles in one 96x16 frame: text, sprite, flat,
+    // patterned, gradient, noise. Each tile holds exactly
+    // the pixels of the single-tile frame its class is
+    // established on, so the classes here are the classes
+    // those tests establish, not values copied from a run.
+    let gradient = rgb_frame(16, 16, |x, _| {
+        let value = u8::try_from(x * 17).unwrap_or(255);
+        [value, value, value]
+    })?;
+    let checkerboard = rgb_frame(16, 16, |x, y| {
+        if (x / 2 + y / 2) % 2 == 0 {
+            [20, 20, 20]
         } else {
-            [200, 30, 90]
+            [235, 235, 235]
         }
     })?;
+    let tiles = [
+        text_frame()?,
+        sprite_frame()?,
+        flat_frame(16, 16, [200, 30, 90])?,
+        checkerboard,
+        gradient,
+        noise_frame()?,
+    ];
+    let mut data = Vec::with_capacity(96 * 16 * 3);
+    for y in 0..16 {
+        for tile in &tiles {
+            data.extend_from_slice(tile.row(y));
+        }
+    }
+    let frame = Frame::new(96, 16, PixelFormat::Rgb8, data).map_err(|err| err.to_string())?;
     let map = analyze_frame(&frame);
     let routes = map.routes(&RoutingProfile::default());
-    assert_eq!(routes.len(), 2);
-    assert_eq!(routes[0].class, ContentClass::Text);
+    assert_eq!(routes.len(), 6);
+    let expected = [
+        (ContentClass::Text, Route::Branch("text")),
+        (ContentClass::Sprite, Route::Branch("sprite")),
+        (ContentClass::Flat, Route::Branch("flat")),
+        (ContentClass::Patterned, Route::Branch("patterned")),
+        (ContentClass::Gradient, Route::Branch("gradient")),
+        (ContentClass::Unknown, Route::General),
+    ];
+    for (index, (class, route)) in expected.iter().enumerate() {
+        assert_eq!(routes[index].class, *class, "tile {index} class");
+        assert_eq!(routes[index].route, *route, "tile {index} route");
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_table_resolves_each_class_to_its_algorithm() {
+    let general = "contour";
+    assert_eq!(resolve_algorithm(ContentClass::Text, general), "contour");
+    assert_eq!(resolve_algorithm(ContentClass::Sprite, general), "contour");
+    assert_eq!(resolve_algorithm(ContentClass::Flat, general), "nearest");
+    assert_eq!(
+        resolve_algorithm(ContentClass::Patterned, general),
+        "nearest"
+    );
+    assert_eq!(
+        resolve_algorithm(ContentClass::Gradient, general),
+        "bilinear"
+    );
+    assert_eq!(resolve_algorithm(ContentClass::Unknown, general), "contour");
+}
+
+#[test]
+fn unknown_takes_the_general_algorithm() {
+    assert_eq!(
+        resolve_algorithm(ContentClass::Unknown, "nearest"),
+        "nearest"
+    );
+    assert_eq!(
+        resolve_algorithm(ContentClass::Unknown, "bilinear"),
+        "bilinear"
+    );
+    assert_eq!(
+        resolve_algorithm(ContentClass::Unknown, "nearest-gpu"),
+        "nearest-gpu"
+    );
+}
+
+#[test]
+fn nearest_table_entries_follow_the_gpu_general_path() {
+    let general = "nearest-gpu";
+    assert_eq!(
+        resolve_algorithm(ContentClass::Flat, general),
+        "nearest-gpu"
+    );
+    assert_eq!(
+        resolve_algorithm(ContentClass::Patterned, general),
+        "nearest-gpu"
+    );
+    assert_eq!(
+        resolve_algorithm(ContentClass::Unknown, general),
+        "nearest-gpu"
+    );
+    assert_eq!(resolve_algorithm(ContentClass::Text, general), "contour");
+    assert_eq!(
+        resolve_algorithm(ContentClass::Gradient, general),
+        "bilinear"
+    );
+}
+
+#[test]
+fn routing_table_ids_are_registered() -> Result<(), String> {
+    let registry = AlgorithmRegistry::builtin();
+    let mut seen: Vec<&'static str> = Vec::new();
+    for (_, id) in ROUTING_TABLE {
+        if !seen.contains(&id) {
+            seen.push(id);
+        }
+    }
+    for id in seen {
+        registry.lookup(id).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn routed_algorithms_groups_branches_per_algorithm() {
+    let profile = RoutingProfile::default();
+    let algorithms = profile.routed_algorithms("contour");
+    assert_eq!(algorithms.len(), 3);
+    assert_eq!(algorithms[0].id, "contour");
+    assert_eq!(algorithms[0].branches, vec!["text", "sprite"]);
+    assert!(algorithms[0].general);
+    assert_eq!(algorithms[1].id, "nearest");
+    assert_eq!(algorithms[1].branches, vec!["flat", "patterned"]);
+    assert!(!algorithms[1].general);
+    assert_eq!(algorithms[2].id, "bilinear");
+    assert_eq!(algorithms[2].branches, vec!["gradient"]);
+    assert!(!algorithms[2].general);
+}
+
+#[test]
+fn routed_algorithms_with_nearest_general() {
+    let profile = RoutingProfile::default();
+    let algorithms = profile.routed_algorithms("nearest");
+    assert_eq!(algorithms.len(), 3);
+    assert_eq!(algorithms[0].id, "contour");
+    assert_eq!(algorithms[0].branches, vec!["text", "sprite"]);
+    assert!(!algorithms[0].general);
+    assert_eq!(algorithms[1].id, "nearest");
+    assert_eq!(algorithms[1].branches, vec!["flat", "patterned"]);
+    assert!(algorithms[1].general);
+    assert_eq!(algorithms[2].id, "bilinear");
+    assert_eq!(algorithms[2].branches, vec!["gradient"]);
+    assert!(!algorithms[2].general);
+}
+
+#[test]
+fn routed_algorithms_with_gpu_general() {
+    let profile = RoutingProfile::default();
+    let algorithms = profile.routed_algorithms("nearest-gpu");
+    assert_eq!(algorithms.len(), 3);
+    assert_eq!(algorithms[0].id, "contour");
+    assert_eq!(algorithms[0].branches, vec!["text", "sprite"]);
+    assert!(!algorithms[0].general);
+    assert_eq!(algorithms[1].id, "nearest-gpu");
+    assert_eq!(algorithms[1].branches, vec!["flat", "patterned"]);
+    assert!(algorithms[1].general);
+    assert_eq!(algorithms[2].id, "bilinear");
+    assert_eq!(algorithms[2].branches, vec!["gradient"]);
+    assert!(!algorithms[2].general);
+    assert!(
+        algorithms.iter().all(|entry| entry.id != "nearest"),
+        "a GPU run builds no CPU nearest graph"
+    );
+}
+
+#[test]
+fn override_forces_routing_through_the_resolver() -> Result<(), String> {
+    // A flat tile overridden to Text routes through the
+    // text branch and resolves to Contour, not to the
+    // nearest the detector's class would have taken.
+    let frame = flat_frame(16, 16, [200, 30, 90])?;
+    let analyzer = RegionAnalyzer::default();
+    let overrides = [TileOverride::new(0, 0, 1, 1, ContentClass::Text)];
+    let map = analyzer.analyze(&frame, &overrides, None);
+    let routes = map.routes(&RoutingProfile::default());
     assert_eq!(routes[0].route, Route::Branch("text"));
-    assert_eq!(routes[1].class, ContentClass::Flat);
-    assert_eq!(routes[1].route, Route::General);
+    assert_eq!(resolve_algorithm(routes[0].class, "contour"), "contour");
+    // The same tile overridden to Unknown takes the
+    // general path, which follows the run's algorithm.
+    let overrides = [TileOverride::new(0, 0, 1, 1, ContentClass::Unknown)];
+    let map = analyzer.analyze(&frame, &overrides, None);
+    let routes = map.routes(&RoutingProfile::default());
+    assert_eq!(routes[0].route, Route::General);
+    assert_eq!(resolve_algorithm(routes[0].class, "bilinear"), "bilinear");
     Ok(())
 }
 
@@ -703,9 +875,10 @@ fn class_change_halo_invalidates_neighbors() -> Result<(), String> {
         Some(&second_map),
     );
     assert_eq!(same.class_change_halos(&second_map, &profile).count(), 0);
-    // A tile that changes class onto the general path gets
-    // no halo: the gradient tile's change invalidates
-    // nothing on its own.
+    // A tile that changes class into a routed branch gets a
+    // halo: the gradient tile's change invalidates the tile
+    // and its neighbor through the branch halo, since
+    // gradient now routes to a branch.
     let flat = text_and_flat_frame()?;
     let flat_map = analyzer.analyze(&flat, &[], None);
     let graded = text_and_gradient_frame()?;
@@ -716,9 +889,9 @@ fn class_change_halo_invalidates_neighbors() -> Result<(), String> {
         Some(&flat_map),
     );
     assert_eq!(tile_class(&graded_map, 1, 0)?, ContentClass::Gradient);
-    assert_eq!(
-        graded_map.class_change_halos(&flat_map, &profile).count(),
-        0
-    );
+    let halos = graded_map.class_change_halos(&flat_map, &profile);
+    assert_eq!(halos.count(), 2);
+    assert!(halos.is_dirty(0, 0));
+    assert!(halos.is_dirty(1, 0));
     Ok(())
 }

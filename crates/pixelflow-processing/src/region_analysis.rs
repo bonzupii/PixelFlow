@@ -9,9 +9,12 @@
 //! [`RegionAnalyzer::analyze_dirty`], restricted to the tiles
 //! whose pixels changed, and hands the map's
 //! [`RegionMap::routes`] to the graph, which resolves every
-//! route to a node. No per-branch processors exist yet, so
-//! every route resolves to the same Contour node; the branch
-//! processors are a later step.
+//! route to a node. The run path builds one graph per
+//! algorithm the routing table names (see
+//! [`ROUTING_TABLE`] and [`resolve_algorithm`]) and runs
+//! only the graphs the frame's tiles need, compositing the
+//! outputs tile by tile, so each tile is processed by the
+//! algorithm its class routes to.
 //!
 //! The analysis is color and edge features only. It does not do
 //! semantic object recognition: it cannot tell what a shape
@@ -132,13 +135,15 @@
 //! override is removed.
 //!
 //! [`RoutingProfile`] maps each class to a branch name, or to
-//! the general path. The default routes only Text and Sprite
-//! differently and leaves everything else on the general path,
-//! including [`ContentClass::Unknown`], which always uses the
-//! general path. [`RegionMap::halo_for`] and
-//! [`RegionMap::halos`] give the overlap tiles around routed
-//! tiles, so a branch that reads across a tile edge does not
-//! seam against its neighbor.
+//! the general path. The default routes every class to its
+//! branch; [`ContentClass::Unknown`] always uses the general
+//! path. [`ROUTING_TABLE`] maps each branch's class to the
+//! algorithm that processes it, so a branch name and an
+//! algorithm id are different things: the profile says where
+//! a tile goes, the table says what processes it there.
+//! [`RegionMap::halo_for`] and [`RegionMap::halos`] give the
+//! overlap tiles around routed tiles, so a branch that reads
+//! across a tile edge does not seam against its neighbor.
 
 use pixelflow_core::{DirtySet, Frame, TileGrid};
 
@@ -892,9 +897,10 @@ impl RegionMap {
 
 /// Where a tile is processed: the general-purpose path, or a
 /// named branch. Branch names are metadata: the graph maps
-/// them to nodes with `GraphBuilder::route_branch`, and every
-/// branch resolves to the same node until per-branch
-/// processors exist.
+/// them to nodes with `GraphBuilder::route_branch`, and the
+/// run path builds one graph per algorithm the routing table
+/// names, so each branch is processed by its tabled
+/// algorithm, not by the general-path node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// The general-purpose path. This is where
@@ -921,9 +927,13 @@ pub struct TileRoute {
 /// [`ContentClass::Unknown`] always uses the general path:
 /// it cannot be assigned a branch.
 ///
-/// The default profile routes only Text and Sprite
-/// differently and leaves everything else on the general
-/// path, until the detector earns trust.
+/// The default profile routes every class to its branch:
+/// Text to `"text"`, Sprite to `"sprite"`, Flat to
+/// `"flat"`, Patterned to `"patterned"`, Gradient to
+/// `"gradient"`. What processes a branch is
+/// [`ROUTING_TABLE`], not this profile: the profile says
+/// where a tile goes, the table says what processes it
+/// there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutingProfile {
     /// Branch for text tiles, or `None` for the general path.
@@ -948,9 +958,9 @@ impl Default for RoutingProfile {
         Self {
             text_branch: Some("text"),
             sprite_branch: Some("sprite"),
-            flat_branch: None,
-            patterned_branch: None,
-            gradient_branch: None,
+            flat_branch: Some("flat"),
+            patterned_branch: Some("patterned"),
+            gradient_branch: Some("gradient"),
             halo_radius_px: DEFAULT_HALO_RADIUS_PX,
         }
     }
@@ -1002,6 +1012,134 @@ impl RoutingProfile {
     pub const fn halo_radius_px(&self) -> u32 {
         self.halo_radius_px
     }
+
+    /// The algorithms a routed run needs, given the
+    /// general-path algorithm id: one entry per distinct
+    /// registry id [`resolve_algorithm`] returns over all
+    /// classes, in first-use class order, each with the
+    /// branch names it serves and whether it serves the
+    /// general path. The run path builds one graph per
+    /// entry and runs only the entries the frame's tiles
+    /// actually need.
+    #[must_use]
+    pub fn routed_algorithms<'a>(&self, general_algorithm: &'a str) -> Vec<RoutedAlgorithm<'a>> {
+        let mut algorithms: Vec<RoutedAlgorithm<'a>> = Vec::new();
+        for class in ALL_CLASSES {
+            let id = resolve_algorithm(class, general_algorithm);
+            let index = if let Some(index) = algorithms.iter().position(|entry| entry.id == id) {
+                index
+            } else {
+                algorithms.push(RoutedAlgorithm {
+                    id,
+                    branches: Vec::new(),
+                    general: id == general_algorithm,
+                });
+                algorithms.len() - 1
+            };
+            let slot = &mut algorithms[index];
+            if let Some(branch) = self.branch_name(class)
+                && !slot.branches.contains(&branch)
+            {
+                slot.branches.push(branch);
+            }
+        }
+        algorithms
+    }
+}
+
+/// Every content class, in the order the routing table
+/// lists the classified classes, with
+/// [`ContentClass::Unknown`] last.
+pub const ALL_CLASSES: [ContentClass; 6] = [
+    ContentClass::Text,
+    ContentClass::Sprite,
+    ContentClass::Flat,
+    ContentClass::Patterned,
+    ContentClass::Gradient,
+    ContentClass::Unknown,
+];
+
+/// The routing table: which registry algorithm processes
+/// each content class. One table, read by
+/// [`resolve_algorithm`]; no per-class match exists
+/// anywhere else in the run path. The ids are registry ids:
+/// `"contour"`, `"nearest"`, `"bilinear"`.
+///
+/// - Text: Contour. Thin strokes and sharp corners are what
+///   Contour reconstructs: its edge follower traces the
+///   stroke and rebuilds it at scale. Nearest would step
+///   the stroke into blocks; bilinear would blur it.
+/// - Sprite: Contour. A bounded shape with a silhouette
+///   needs the same edge reconstruction as text: the
+///   silhouette is the shape.
+/// - Flat: Nearest. A flat tile is one color, or two colors
+///   within a few levels, so nearest copies the color
+///   exactly. Contour would move it: its hard-light stage
+///   shifts flat mid-tones by up to just under 16 levels,
+///   which is a defect on a background that must stay
+///   solid. Bilinear would blend the tile's edge pixels
+///   with its neighbor. Nearest is exact and cheapest here.
+/// - Patterned: Nearest. A repeating structure is preserved
+///   exactly when each source pixel is replicated: the
+///   period and the colors survive the scale unchanged. Any
+///   reconstruction risks changing the period or the phase,
+///   and bilinear blurs the pattern's edges.
+/// - Gradient: Bilinear. A smooth directional ramp is what
+///   bilinear interpolation reproduces: linear between
+///   source pixels, which matches a linear gradient up to
+///   rounding, with no steps and no banding. Nearest would
+///   step the ramp; Contour would shift it with hard light.
+/// - Unknown: no table entry. It always takes the general
+///   path, the algorithm the run was started with: section 9
+///   of the specification gives unclassified content the
+///   general-purpose algorithm, not a guess.
+pub const ROUTING_TABLE: [(ContentClass, &str); 5] = [
+    (ContentClass::Text, "contour"),
+    (ContentClass::Sprite, "contour"),
+    (ContentClass::Flat, "nearest"),
+    (ContentClass::Patterned, "nearest"),
+    (ContentClass::Gradient, "bilinear"),
+];
+
+/// Resolve a tile's class to the registry id of the
+/// algorithm that processes it, given the general-path
+/// algorithm id of the run. The table answers for the five
+/// classified classes; [`ContentClass::Unknown`] takes
+/// `general_algorithm`, the algorithm the run was started
+/// with. A table entry naming `"nearest"` resolves to
+/// `"nearest-gpu"` when the general path is
+/// `"nearest-gpu"`: the GPU node is the same algorithm on
+/// the GPU backend, and a run started on the GPU keeps
+/// every nearest tile on it instead of splitting nearest
+/// between backends.
+#[must_use]
+pub fn resolve_algorithm(class: ContentClass, general_algorithm: &str) -> &str {
+    if class == ContentClass::Unknown {
+        return general_algorithm;
+    }
+    let algorithm = ROUTING_TABLE
+        .iter()
+        .find(|(candidate, _)| *candidate == class)
+        .map_or(general_algorithm, |(_, algorithm)| *algorithm);
+    if algorithm == "nearest" && general_algorithm == "nearest-gpu" {
+        "nearest-gpu"
+    } else {
+        algorithm
+    }
+}
+
+/// One algorithm's share of a routed run: its registry id,
+/// the branch names it serves, and whether it serves the
+/// general path. Built by
+/// [`RoutingProfile::routed_algorithms`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedAlgorithm<'a> {
+    /// Registry id of the algorithm.
+    pub id: &'a str,
+    /// Branch names routed to this algorithm, in class order.
+    pub branches: Vec<&'static str>,
+    /// True when this algorithm serves the general path.
+    pub general: bool,
 }
 
 /// The pixels of one tile, row-major, as RGB triples. The
