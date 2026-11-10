@@ -70,6 +70,24 @@ pub enum ProcessError {
     },
     /// The algorithm failed internally; the message says why.
     Internal(String),
+    /// The input would need more working memory than the
+    /// documented budget allows. This is a property of the
+    /// requested output size, not an internal failure: the
+    /// caller asked for an output the algorithm refuses to
+    /// build. The budget and the measured per-pixel cost are
+    /// recorded in `docs/performance.md`.
+    MemoryBudgetExceeded {
+        /// Name of the algorithm that refused the input.
+        algorithm: &'static str,
+        /// Output pixels requested (`width * height` at the
+        /// requested scale).
+        output_pixels: u64,
+        /// Working set the output would need, in bytes,
+        /// estimated from the measured per-pixel cost.
+        estimated_bytes: u64,
+        /// The budget, in bytes.
+        budget_bytes: u64,
+    },
 }
 
 impl std::fmt::Display for ProcessError {
@@ -82,6 +100,16 @@ impl std::fmt::Display for ProcessError {
                 write!(f, "{algorithm} does not accept {format} frames")
             }
             ProcessError::Internal(msg) => write!(f, "processing failed: {msg}"),
+            ProcessError::MemoryBudgetExceeded {
+                algorithm,
+                output_pixels,
+                estimated_bytes,
+                budget_bytes,
+            } => write!(
+                f,
+                "{algorithm} refuses {output_pixels} output pixels: estimated working set \
+                 {estimated_bytes} bytes exceeds the {budget_bytes} byte budget"
+            ),
         }
     }
 }

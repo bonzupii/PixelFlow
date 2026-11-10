@@ -8,6 +8,10 @@ description = "PixelFlow command-line interface"
 name = "pixelflow"
 path = "src/main.rs"
 
+[[bin]]
+name = "pixelflow-bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 pixelflow-core = { workspace = true }
 pixelflow-processing = { workspace = true }

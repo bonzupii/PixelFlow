@@ -1700,6 +1700,46 @@ fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
 /// `width * scale` by `height * scale`.
 pub struct Contour;
 
+/// Working-set estimate per output pixel, in bytes. Measured by
+/// `pixelflow-bench` (see `docs/performance.md`): the peak-RSS
+/// slope across sizes is about 84 bytes per output pixel, and the
+/// largest observed ratio is 114 at the smallest size, where the
+/// process baseline dominates. 128 is the conservative bound used
+/// for the refusal check below.
+const BYTES_PER_OUTPUT_PIXEL: u64 = 128;
+
+/// Maximum working set Contour may allocate for one frame: 2 GiB,
+/// a quarter of an 8 GiB machine. At 128 bytes per output pixel
+/// this allows up to 16,777,216 output pixels, which covers every
+/// benchmarked case except 1920x1080 at 4x (33,177,600 output
+/// pixels, 2,759 MiB measured peak).
+const MEMORY_BUDGET_BYTES: u64 = 2 << 30;
+
+impl Contour {
+    /// Refuse an output size whose estimated working set exceeds
+    /// the memory budget, before allocating anything for it. The
+    /// estimate is `output pixels * BYTES_PER_OUTPUT_PIXEL`;
+    /// anything over the budget is refused rather than started.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::MemoryBudgetExceeded`] when the
+    /// estimate exceeds [`MEMORY_BUDGET_BYTES`].
+    pub fn check_memory_budget(output_width: u32, output_height: u32) -> Result<(), ProcessError> {
+        let output_pixels = u64::from(output_width) * u64::from(output_height);
+        let estimated = output_pixels.saturating_mul(BYTES_PER_OUTPUT_PIXEL);
+        if estimated > MEMORY_BUDGET_BYTES {
+            return Err(ProcessError::MemoryBudgetExceeded {
+                algorithm: "contour",
+                output_pixels,
+                estimated_bytes: estimated,
+                budget_bytes: MEMORY_BUDGET_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl Processor for Contour {
     fn name(&self) -> &'static str {
         "contour"
@@ -1742,6 +1782,9 @@ impl Processor for Contour {
         let out_height = frame.height().checked_mul(scale).ok_or_else(|| {
             ProcessError::Internal("contour output height exceeds u32 range".into())
         })?;
+        // Refuse an output that would exceed the memory budget
+        // before allocating anything for it.
+        Contour::check_memory_budget(out_width, out_height)?;
         let src = UImg {
             w: frame.width() as usize,
             h: frame.height() as usize,
