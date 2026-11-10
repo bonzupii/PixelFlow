@@ -436,7 +436,7 @@ fn process_frame(
 /// false once the loop has closed. Ends when the exit flag is set,
 /// the target exits, the loop closes, or capture fails.
 fn run_processing(
-    backend: &mut WaylandCapture,
+    backend: &mut impl CaptureBackend,
     launcher: &mut Launcher,
     algorithm: &str,
     scale: u32,
@@ -664,6 +664,157 @@ mod tests {
         fn shutdown(&mut self) -> Result<(), CaptureError> {
             Ok(())
         }
+    }
+
+    /// A capture backend that yields queued frames, then
+    /// nothing, for the processing-thread tests: the synthetic
+    /// frame source that stands in for the `PipeWire` stream.
+    struct FrameFeedBackend {
+        queued: std::collections::VecDeque<Result<Option<Frame>, CaptureError>>,
+        seen: u64,
+    }
+
+    impl FrameFeedBackend {
+        fn new(frames: Vec<Frame>) -> FrameFeedBackend {
+            FrameFeedBackend {
+                queued: frames.into_iter().map(|frame| Ok(Some(frame))).collect(),
+                seen: 0,
+            }
+        }
+
+        fn failing(error: CaptureError) -> FrameFeedBackend {
+            FrameFeedBackend {
+                queued: std::collections::VecDeque::from([Err(error)]),
+                seen: 0,
+            }
+        }
+    }
+
+    impl CaptureBackend for FrameFeedBackend {
+        fn initialize(&mut self, _config: &CaptureConfig) -> Result<(), CaptureError> {
+            Ok(())
+        }
+
+        fn capture_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
+            match self.queued.pop_front() {
+                Some(Ok(Some(frame))) => {
+                    self.seen += 1;
+                    Ok(Some(frame))
+                }
+                Some(other) => other,
+                None => Ok(None),
+            }
+        }
+
+        fn shutdown(&mut self) -> Result<(), CaptureError> {
+            Ok(())
+        }
+
+        fn frames_seen(&self) -> u64 {
+            self.seen
+        }
+    }
+
+    #[test]
+    fn processing_thread_publishes_processed_frames_and_wakes_the_loop() -> Result<(), String> {
+        let frames = vec![
+            Frame::filled(4, 4, PixelFormat::Rgb8, 10).map_err(|e| e.to_string())?,
+            Frame::filled(4, 4, PixelFormat::Rgb8, 20).map_err(|e| e.to_string())?,
+            Frame::filled(4, 4, PixelFormat::Rgb8, 30).map_err(|e| e.to_string())?,
+        ];
+        let mut backend = FrameFeedBackend::new(frames);
+        let mut launcher =
+            Launcher::spawn("/bin/sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
+        let slot = Arc::new(FrameSlot::new());
+        let exit = Arc::new(AtomicBool::new(false));
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wakes_in_worker = wakes.clone();
+        let slot_in_worker = slot.clone();
+        let exit_in_worker = exit.clone();
+        let worker = std::thread::spawn(move || {
+            run_processing(
+                &mut backend,
+                &mut launcher,
+                "nearest",
+                2,
+                slot_in_worker,
+                move || {
+                    wakes_in_worker.fetch_add(1, Ordering::Relaxed);
+                    true
+                },
+                exit_in_worker,
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while wakes.load(Ordering::Relaxed) < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            3,
+            "one wake per published frame"
+        );
+        let frame = slot
+            .take()
+            .ok_or("expected a processed frame in the slot")?;
+        assert_eq!((frame.width(), frame.height()), (8, 8));
+        assert_eq!(frame.data()[0], 30, "the newest frame wins");
+        exit.store(true, Ordering::Relaxed);
+        let result = worker
+            .join()
+            .map_err(|_| "processing thread panicked".to_string())?;
+        assert!(
+            result.is_ok(),
+            "processing ends cleanly once the exit flag is set: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_error_ends_processing_with_an_error() -> Result<(), String> {
+        let mut backend = FrameFeedBackend::failing(CaptureError::Disconnected);
+        let mut launcher =
+            Launcher::spawn("/bin/sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
+        let slot = Arc::new(FrameSlot::new());
+        let exit = Arc::new(AtomicBool::new(false));
+        let result = run_processing(
+            &mut backend,
+            &mut launcher,
+            "nearest",
+            2,
+            slot,
+            || true,
+            exit,
+        );
+        assert!(result.is_err(), "a capture error ends processing");
+        assert!(
+            matches!(&result, Err(e) if e.contains("capture failed") && e.contains("disconnected")),
+            "the error names the capture failure, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn target_exit_ends_processing_cleanly() -> Result<(), String> {
+        let mut backend = FrameFeedBackend::new(vec![]);
+        let mut launcher = Launcher::spawn("/bin/true", &[]).map_err(|e| e.to_string())?;
+        std::thread::sleep(Duration::from_millis(200));
+        let slot = Arc::new(FrameSlot::new());
+        let exit = Arc::new(AtomicBool::new(false));
+        let result = run_processing(
+            &mut backend,
+            &mut launcher,
+            "nearest",
+            2,
+            slot,
+            || true,
+            exit,
+        );
+        assert!(
+            result.is_ok(),
+            "an exited target ends processing cleanly: {result:?}"
+        );
+        Ok(())
     }
 
     #[test]
