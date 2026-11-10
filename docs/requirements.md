@@ -226,11 +226,40 @@ Contour product algorithm; do not confuse the two.
 ## 7. Known blockers and unverified items
 
 - Wayland live acceptance: UNVERIFIED. The portal fix (commit `4b5cbb4`)
-  is committed and its mock-portal test exists, but no desktop, portal,
-  PipeWire daemon, or wgpu adapter exists on this VM. The owner's
-  machine (NixOS, xdg-desktop-portal 1.20.4) is the live test
-  environment; his next `pixelflow run` is the acceptance test. His
-  compositor and ScreenCast backend are still unknown.
+  was verified claim-by-claim against the code by an independent
+  verification worker (2026-11-10): cursor modes queried before use,
+  persist gated on interface version >= 4, selection response read
+  before Start, Closed signal subscribed, partial sessions closed on
+  failure paths, serial targeting with node-id fallback, single shared
+  process runtime — all confirmed with file:line evidence. The mock
+  portal test genuinely executes under `dbus-run-session` (1 passed,
+  1.10 s, all scenarios: version 6/embedded, hidden-only,
+  metadata-only, nothing-advertised, version 1, no-serial,
+  hyphenated-serial, cancelled selection, closed-after-selection,
+  cancelled start). No ashpd async gap: the response is awaited
+  inside the call. But no desktop, portal, PipeWire daemon, or wgpu
+  adapter exists on this VM, so no real compositor dialog, real
+  stream, or frame has been observed. The owner's machine (NixOS,
+  xdg-desktop-portal 1.20.4) is the live test environment; his next
+  `pixelflow run` is the acceptance test. His compositor and
+  ScreenCast backend are still unknown.
+- Portal-fix gaps found by verification (none fail the claimed fix;
+  follow-up work assigned): (1) Closed detection is a single
+  non-blocking poll after selection and in the Start error branch —
+  a Close arriving in the race window is detected via the Start
+  error, not prevented; no Closed check after Start succeeds before
+  `open_pipe_wire_remote`; a `receive_closed` subscription failure
+  logs and continues with detection off. (2) Latent unclosed path in
+  `capture.rs:51-55` if `take_fd()` returned `None` — practically
+  unreachable (`open` always sets the fd), no `Drop` close by design.
+  (3) Serial targeting usually will not engage against a real portal:
+  ashpd 0.14 parses only the `pipewire_serial` (underscore) key while
+  the portal specification wires `pipewire-serial` (hyphen), so the
+  node-id fallback is the live path. (4) A `PORTAL_RUNTIME` build
+  failure is cached forever with no retry. (5) The mock-portal test
+  silently skips without a session bus — a plain `cargo test` run
+  reports a green mock test that exercised nothing; the gate must run
+  it under `dbus-run-session` or the test must fail loudly.
 - GPU execution: UNVERIFIED and unimplemented. No adapter on this VM.
 - Previous coordinator `338e91a0` (spawned 2026-11-10 07:22) is
   superseded by the current coordinator. It landed the portal fix and
@@ -294,7 +323,8 @@ integrates worktree work onto `main`.
 | --- | --- | --- | --- |
 | Algorithm framework | framework worker, worktree `~/workspace/pixelflow-framework`, branch `framework/algorithm-registry` | Contract, registry, graph/CLI integration, test algorithm, "algorithm 20" removal, `docs/algorithm-integration.md` | Running |
 | GPU execution | GPU worker, worktree `~/workspace/pixelflow-gpu`, branch `gpu/compute-path` | `pixelflow-gpu` crate, adapter fallback chain, GPU-resident images, WGSL nearest-neighbour compute node with CPU parity | Running |
-| Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Running |
+| Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
+| Wayland follow-up | to be spawned, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key) | Not started |
 | Requirements/status | coordinator | This document | This file |
 
 Concurrent writers use isolated worktrees. Workers commit in their
@@ -356,8 +386,10 @@ a documented blocker.
 In execution order (§11 of the owner directive):
 
 1. Baseline test suite at `4b1289a` — running; record result.
-2. Wayland verification report — in flight; then live acceptance on the
-   owner's machine.
+2. Wayland verification report — done 2026-11-10 (all claims verified,
+   mock test genuinely exercised under `dbus-run-session`, 5 gaps
+   recorded); live acceptance on the owner's machine still open.
+   Wayland follow-up fixes (gaps 1, 2, 4, 5; assess 3) — to be spawned.
 3. Algorithm integration framework — in flight; acceptance per §3.
 4. GPU processing with CPU retained — in flight; acceptance: real wgpu
    compute node through the graph, pixel-identical to CPU nearest,
