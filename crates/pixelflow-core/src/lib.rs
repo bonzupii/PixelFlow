@@ -14,7 +14,7 @@ pub use frame::{Frame, FrameError, GpuResource};
 pub use frame_slot::FrameSlot;
 pub use graph::{
     Graph, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, ProcessorNode, Source,
-    SpatialDependency, TemporalDependency,
+    SpatialDependency, TemporalDependency, TileRouting,
 };
 pub use incremental::{DirtySet, TILE_SIZE, TileGrid};
 pub use pipeline::{ProcessError, Processor, StrideSupport};

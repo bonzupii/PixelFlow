@@ -491,6 +491,13 @@ pub struct GraphBuilder {
     inputs: Vec<(String, PixelFormat)>,
     /// Graph output name, producing node name, producing port.
     outputs: Vec<(String, String, &'static str)>,
+    /// Branch name and the node that processes it, in the
+    /// order routed. A branch routed twice takes the last
+    /// assignment.
+    branch_nodes: Vec<(&'static str, String)>,
+    /// Node that processes the general path, when one is
+    /// routed.
+    general_node: Option<String>,
 }
 
 impl GraphBuilder {
@@ -542,6 +549,27 @@ impl GraphBuilder {
         self
     }
 
+    /// Route a branch to a node: tiles whose region class maps
+    /// to `branch` are processed by `node`. A branch with no
+    /// route falls back to the general path at run time. The
+    /// node must exist in the graph; [`GraphBuilder::build`]
+    /// reports it otherwise.
+    #[must_use]
+    pub fn route_branch(&mut self, branch: &'static str, node: &str) -> &mut Self {
+        self.branch_nodes.push((branch, node.to_string()));
+        self
+    }
+
+    /// Route the general path to a node: tiles with no branch,
+    /// and tiles on a branch with no route, are processed by
+    /// `node`. The node must exist in the graph;
+    /// [`GraphBuilder::build`] reports it otherwise.
+    #[must_use]
+    pub fn route_general(&mut self, node: &str) -> &mut Self {
+        self.general_node = Some(node.to_string());
+        self
+    }
+
     /// Validate the graph and return it, or return the first
     /// validation error found.
     ///
@@ -556,6 +584,7 @@ impl GraphBuilder {
         self.validate_feeds()?;
         self.validate_formats()?;
         self.validate_outputs()?;
+        self.validate_routes()?;
         // Topological order; a cycle leaves nodes unordered.
         let order = topological_order(&self.nodes, &self.edges)?;
         let feed = self.build_feed()?;
@@ -570,6 +599,10 @@ impl GraphBuilder {
             order,
             prev_inputs: HashMap::new(),
             node_caches: HashMap::new(),
+            branch_nodes: self.branch_nodes.into_iter().collect(),
+            general_node: self.general_node,
+            routing: None,
+            routing_invalidated: None,
         })
     }
 
@@ -732,6 +765,22 @@ impl GraphBuilder {
         Ok(())
     }
 
+    /// Every routed branch and the general path name a node
+    /// in the graph.
+    fn validate_routes(&self) -> Result<(), GraphError> {
+        for (_, node) in &self.branch_nodes {
+            if self.node_index(node).is_none() {
+                return Err(GraphError::UnknownNode(node.clone()));
+            }
+        }
+        if let Some(node) = &self.general_node
+            && self.node_index(node).is_none()
+        {
+            return Err(GraphError::UnknownNode(node.clone()));
+        }
+        Ok(())
+    }
+
     /// Per node, per input port in declaration order, the slot
     /// that feeds it.
     fn build_feed(&self) -> Result<Vec<Vec<(Slot, &'static str)>>, GraphError> {
@@ -857,6 +906,76 @@ fn topological_order(
     Ok(order)
 }
 
+/// Per-tile routing assignment for one frame: which branch,
+/// if any, each tile routes to. `None` is the general path.
+/// The branch names are the routing profile's names, such as
+/// `"text"`; the graph maps them to nodes with
+/// [`GraphBuilder::route_branch`], and
+/// [`Graph::node_for_tile`] is the decision point that reads
+/// this table. The table is metadata only: it names where
+/// each tile goes, and the executor runs the node it names.
+/// With one node in the graph every branch resolves to it,
+/// so the table changes no pixels until per-branch
+/// processors exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileRouting {
+    /// The tile grid these assignments index into.
+    grid: TileGrid,
+    /// Branch per tile, row-major; `None` is the general path.
+    branches: Vec<Option<&'static str>>,
+}
+
+impl TileRouting {
+    /// No tile routed to a branch: every tile takes the
+    /// general path.
+    #[must_use]
+    pub fn empty(grid: TileGrid) -> Self {
+        Self {
+            grid,
+            branches: vec![None; grid.tile_count()],
+        }
+    }
+
+    /// The tile grid this routing indexes into.
+    #[must_use]
+    pub fn grid(&self) -> TileGrid {
+        self.grid
+    }
+
+    /// The branch tile (`tx`, `ty`) routes to, or `None`
+    /// when the tile takes the general path or is outside the
+    /// grid. Callers that need the distinction check the grid
+    /// first; [`Graph::node_for_tile`] does.
+    #[must_use]
+    pub fn branch_for(&self, tx: u32, ty: u32) -> Option<&'static str> {
+        if tx >= self.grid.cols() || ty >= self.grid.rows() {
+            return None;
+        }
+        self.branches[self.grid.tile_index(tx, ty)]
+    }
+
+    /// Route tile (`tx`, `ty`) to `branch`, or to the general
+    /// path when `branch` is `None`. Out-of-range tiles are
+    /// ignored.
+    pub fn set_branch(&mut self, tx: u32, ty: u32, branch: Option<&'static str>) {
+        if tx >= self.grid.cols() || ty >= self.grid.rows() {
+            return;
+        }
+        let index = self.grid.tile_index(tx, ty);
+        self.branches[index] = branch;
+    }
+
+    /// How many tiles route to a branch instead of the
+    /// general path.
+    #[must_use]
+    pub fn routed_count(&self) -> usize {
+        self.branches
+            .iter()
+            .filter(|branch| branch.is_some())
+            .count()
+    }
+}
+
 /// A validated processing graph, ready to run. Built only by
 /// [`GraphBuilder::build`].
 pub struct Graph {
@@ -888,9 +1007,86 @@ pub struct Graph {
     /// of its tiles the next run may treat as stale. Cleared by
     /// [`Graph::run`] together with `prev_inputs`.
     node_caches: HashMap<Slot, Frame>,
+    /// Branch name and the node that processes it, from
+    /// [`GraphBuilder::route_branch`].
+    branch_nodes: HashMap<&'static str, String>,
+    /// Node that processes the general path, from
+    /// [`GraphBuilder::route_general`].
+    general_node: Option<String>,
+    /// Per-tile routing of the most recent frame handed to the
+    /// graph with [`Graph::set_routing`], or `None` before the
+    /// first routed frame. `run` and `run_incremental` leave
+    /// it in place: it describes the frame just processed,
+    /// and the caller refreshes it every frame.
+    routing: Option<TileRouting>,
+    /// Halo-expanded invalidation of the most recent routed
+    /// frame, from [`Graph::set_routing`]: the pixel dirty set
+    /// plus the halo around tiles that changed class. The
+    /// executor does not consume it yet: with a single Global
+    /// node the run is whole-frame regardless, and this set is
+    /// the invalidation the per-branch executor will read.
+    routing_invalidated: Option<DirtySet>,
 }
 
 impl Graph {
+    /// Hand the graph one frame's routing: the per-tile
+    /// branch assignment from the region map, and the
+    /// halo-expanded dirty set for that frame. The routing
+    /// decision point is [`Graph::node_for_tile`], which
+    /// reads this table; call this before `run` for every
+    /// frame, so the table never describes a stale frame.
+    /// `run` leaves the table in place, so the routing of the
+    /// frame just processed stays readable after the run.
+    pub fn set_routing(&mut self, routing: TileRouting, invalidated: DirtySet) {
+        self.routing = Some(routing);
+        self.routing_invalidated = Some(invalidated);
+    }
+
+    /// The per-tile routing of the most recent routed frame,
+    /// or `None` before the first routed frame.
+    #[must_use]
+    pub fn routing(&self) -> Option<&TileRouting> {
+        self.routing.as_ref()
+    }
+
+    /// The halo-expanded invalidation of the most recent
+    /// routed frame, or `None` before the first routed frame.
+    #[must_use]
+    pub fn routing_invalidated(&self) -> Option<&DirtySet> {
+        self.routing_invalidated.as_ref()
+    }
+
+    /// The routing decision point: which node processes
+    /// `branch`. A routed branch resolves to its node; an
+    /// unrouted branch and the general path (`None`) resolve
+    /// to the general node. `None` when no node is assigned
+    /// for the branch: no general node was routed.
+    #[must_use]
+    pub fn node_for_branch(&self, branch: Option<&'static str>) -> Option<&str> {
+        match branch {
+            Some(name) => self
+                .branch_nodes
+                .get(name)
+                .map(String::as_str)
+                .or(self.general_node.as_deref()),
+            None => self.general_node.as_deref(),
+        }
+    }
+
+    /// The routing decision point, per tile: which node
+    /// processes tile (`tx`, `ty`) under the current routing.
+    /// `None` when no routing is set, when the tile is
+    /// outside the grid, or when no node is assigned for the
+    /// tile's branch.
+    #[must_use]
+    pub fn node_for_tile(&self, tx: u32, ty: u32) -> Option<&str> {
+        let routing = self.routing.as_ref()?;
+        if tx >= routing.grid.cols() || ty >= routing.grid.rows() {
+            return None;
+        }
+        self.node_for_branch(routing.branch_for(tx, ty))
+    }
+
     /// Run the graph on `inputs`, one owned frame per declared
     /// graph input port, and return the graph outputs in the
     /// order they were declared. Ownership of the input frames

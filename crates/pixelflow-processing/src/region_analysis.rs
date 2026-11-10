@@ -5,8 +5,13 @@
 //! `docs/incremental-region-aware-architecture.md`, built as a
 //! standalone capability. It produces metadata, not pixels: a
 //! [`RegionMap`] holding one [`TileClassification`] per tile of the
-//! [`TileGrid`]. The graph and the run path do not read it yet;
-//! wiring it into routing is a later step.
+//! [`TileGrid`]. The run path computes one map per frame with
+//! [`RegionAnalyzer::analyze_dirty`], restricted to the tiles
+//! whose pixels changed, and hands the map's
+//! [`RegionMap::routes`] to the graph, which resolves every
+//! route to a node. No per-branch processors exist yet, so
+//! every route resolves to the same Contour node; the branch
+//! processors are a later step.
 //!
 //! The analysis is color and edge features only. It does not do
 //! semantic object recognition: it cannot tell what a shape
@@ -505,11 +510,9 @@ impl RegionAnalyzer {
     /// classification was overridden has no trusted detector
     /// state and is freshly analyzed.
     ///
-    /// This analyzes every tile of the frame. The executor
-    /// will restrict analysis to dirty tiles when the stage
-    /// is wired in, per section 11 of the specification;
-    /// that restriction is the executor's job, not this
-    /// function's.
+    /// This analyzes every tile of the frame: it is
+    /// [`RegionAnalyzer::analyze_dirty`] with the whole grid
+    /// dirty.
     #[must_use]
     pub fn analyze(
         &self,
@@ -517,23 +520,62 @@ impl RegionAnalyzer {
         overrides: &[TileOverride],
         previous: Option<&RegionMap>,
     ) -> RegionMap {
+        let grid = TileGrid::from_dims(frame.width(), frame.height());
+        self.analyze_dirty(frame, &DirtySet::whole(grid), overrides, previous)
+    }
+
+    /// Analyze a frame into a region map, re-analyzing only
+    /// the tiles in `dirty`: the section 11 dirty-restricted
+    /// analysis. A clean tile carries its previous
+    /// classification forward unchanged, which is exactly
+    /// what reclassification gating would return for it: its
+    /// pixels did not change, so its features did not move.
+    /// A tile is re-analyzed when it is dirty, when it has
+    /// no previous classification on the same grid, when its
+    /// previous classification was overridden, or when an
+    /// override covers it. Re-analyzed tiles go through
+    /// [`RegionAnalyzer::classify`], so gating and hysteresis
+    /// still apply to them. A `dirty` set on a different grid
+    /// than the frame analyzes every tile, the conservative
+    /// answer when the grids do not line up.
+    #[must_use]
+    pub fn analyze_dirty(
+        &self,
+        frame: &Frame,
+        dirty: &DirtySet,
+        overrides: &[TileOverride],
+        previous: Option<&RegionMap>,
+    ) -> RegionMap {
         let rgb = frame.to_rgb8();
         let grid = TileGrid::from_dims(rgb.width(), rgb.height());
+        let whole = DirtySet::whole(grid);
+        let dirty = if dirty.grid() == grid { dirty } else { &whole };
         let previous_same_grid = previous.filter(|map| map.grid == grid);
         let mut tiles = Vec::with_capacity(grid.tile_count());
         for ty in 0..grid.rows() {
             for tx in 0..grid.cols() {
-                let features = extract(&rgb, grid, tx, ty);
                 let previous_tile = previous_same_grid
                     .and_then(|map| map.tile(tx, ty))
                     .filter(|tile| !tile.overridden);
-                let mut classification = self.classify(&features, previous_tile);
-                if let Some(tile_override) = overrides.iter().rev().find(|o| o.covers(tx, ty)) {
-                    classification.class = tile_override.class;
-                    classification.confidence = 1.0;
-                    classification.features = features;
-                    classification.overridden = true;
-                }
+                let override_here = overrides.iter().rev().find(|o| o.covers(tx, ty));
+                let reanalyze =
+                    dirty.is_dirty(tx, ty) || previous_tile.is_none() || override_here.is_some();
+                // A tile an override covers is always
+                // re-analyzed, so the carried-forward branch
+                // below never holds an overridden tile.
+                let classification = if let Some(tile) = previous_tile.filter(|_| !reanalyze) {
+                    tile.clone()
+                } else {
+                    let features = extract(&rgb, grid, tx, ty);
+                    let mut classified = self.classify(&features, previous_tile);
+                    if let Some(tile_override) = override_here {
+                        classified.class = tile_override.class;
+                        classified.confidence = 1.0;
+                        classified.features = features;
+                        classified.overridden = true;
+                    }
+                    classified
+                };
                 tiles.push(classification);
             }
         }
@@ -807,6 +849,32 @@ impl RegionMap {
         out
     }
 
+    /// The halo-expanded invalidation for tiles that changed
+    /// class against `previous`: the changed tiles that route
+    /// to a branch under the profile, expanded by the
+    /// profile's halo radius. A tile that changes class is
+    /// routing-dirty even when its pixels did not change, and
+    /// its neighbors are dirty with it: a branch reads across
+    /// the tile edge, so a neighbor it overlaps must be
+    /// re-processed too. This is the part of [`RegionMap::halos`]
+    /// this frame's class changes account for; tiles whose
+    /// class did not change contribute no invalidation here.
+    /// Tiles that changed into a class on the general path
+    /// get no halo.
+    #[must_use]
+    pub fn class_change_halos(&self, previous: &RegionMap, profile: &RoutingProfile) -> DirtySet {
+        let mut changed = DirtySet::empty(self.grid);
+        for (tx, ty) in self.changed_tiles_since(previous) {
+            if self
+                .tile(tx, ty)
+                .is_some_and(|tile| profile.branch_name(tile.class).is_some())
+            {
+                changed.mark(tx, ty);
+            }
+        }
+        changed.expand_by_pixels(profile.halo_radius_px())
+    }
+
     /// The routing decision for every tile under a profile:
     /// each tile's class, confidence, and route.
     #[must_use]
@@ -823,8 +891,10 @@ impl RegionMap {
 }
 
 /// Where a tile is processed: the general-purpose path, or a
-/// named branch. Branch names are metadata: the graph wiring
-/// maps them to subgraphs in a later step.
+/// named branch. Branch names are metadata: the graph maps
+/// them to nodes with `GraphBuilder::route_branch`, and every
+/// branch resolves to the same node until per-branch
+/// processors exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// The general-purpose path. This is where

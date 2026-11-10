@@ -14,7 +14,7 @@
 //! nothing here is a value copied from a run of the code
 //! under test.
 
-use pixelflow_core::{Frame, PixelFormat};
+use pixelflow_core::{DirtySet, Frame, PixelFormat, TileGrid};
 use pixelflow_processing::region_analysis::{
     ContentClass, RegionAnalyzer, RegionMap, Route, RoutingProfile, TileClassification,
     TileFeatures, TileOverride,
@@ -572,5 +572,153 @@ fn tile_outside_grid_is_none() -> Result<(), String> {
     let map = analyze_frame(&frame);
     assert!(map.tile(1, 0).is_none());
     assert!(map.tile(0, 1).is_none());
+    Ok(())
+}
+
+/// True when the pixel is ink in the text tile's bars, in
+/// tile-local coordinates. The same bars as `text_frame`.
+fn text_tile_ink(x: usize, y: usize) -> bool {
+    (x == 1 && (2..11).contains(&y))
+        || (x == 5 && (2..8).contains(&y))
+        || (x == 9 && (5..14).contains(&y))
+        || (x == 13 && (4..15).contains(&y))
+}
+
+/// A 32x16 frame: a text tile on the left, a flat tile on
+/// the right.
+fn text_and_flat_frame() -> Result<Frame, String> {
+    rgb_frame(32, 16, |x, y| {
+        if x < 16 {
+            if text_tile_ink(x, y) {
+                [20, 20, 20]
+            } else {
+                [240, 240, 240]
+            }
+        } else {
+            [200, 30, 90]
+        }
+    })
+}
+
+/// The same frame with the right tile replaced by a
+/// left-to-right linear gradient: the tile changes class
+/// from Flat to Gradient while the text tile stays pixel
+/// identical.
+fn text_and_gradient_frame() -> Result<Frame, String> {
+    rgb_frame(32, 16, |x, y| {
+        if x < 16 {
+            if text_tile_ink(x, y) {
+                [20, 20, 20]
+            } else {
+                [240, 240, 240]
+            }
+        } else {
+            let value = u8::try_from((x - 16) * 17).unwrap_or(255);
+            [value, value, value]
+        }
+    })
+}
+
+/// A 48x16 frame: three flat tiles.
+fn three_flat_frame() -> Result<Frame, String> {
+    flat_frame(48, 16, [200, 30, 90])
+}
+
+/// The same frame with the middle tile replaced by the text
+/// tile's bars.
+fn flat_text_flat_frame() -> Result<Frame, String> {
+    rgb_frame(48, 16, |x, y| {
+        if (16..32).contains(&x) {
+            if text_tile_ink(x - 16, y) {
+                [20, 20, 20]
+            } else {
+                [240, 240, 240]
+            }
+        } else {
+            [200, 30, 90]
+        }
+    })
+}
+
+#[test]
+fn analyze_dirty_matches_analyze_on_whole_set() -> Result<(), String> {
+    let frame = text_and_flat_frame()?;
+    let analyzer = RegionAnalyzer::default();
+    let full = analyzer.analyze(&frame, &[], None);
+    let grid = TileGrid::from_dims(32, 16);
+    let dirty = analyzer.analyze_dirty(&frame, &DirtySet::whole(grid), &[], None);
+    assert_eq!(dirty, full);
+    Ok(())
+}
+
+#[test]
+fn analyze_dirty_reuses_prior_classes_for_clean_tiles() -> Result<(), String> {
+    let analyzer = RegionAnalyzer::default();
+    let first = text_and_flat_frame()?;
+    let first_map = analyzer.analyze(&first, &[], None);
+    assert_eq!(tile_class(&first_map, 0, 0)?, ContentClass::Text);
+    assert_eq!(tile_class(&first_map, 1, 0)?, ContentClass::Flat);
+    // Only the right tile changes: it becomes a gradient.
+    let second = text_and_gradient_frame()?;
+    let diff = DirtySet::diff(&first, &second);
+    assert_eq!(diff.count(), 1);
+    assert!(diff.is_dirty(1, 0));
+    let second_map = analyzer.analyze_dirty(&second, &diff, &[], Some(&first_map));
+    // The clean text tile is carried forward exactly, with
+    // its stored features; the dirty tile is reclassified.
+    assert_eq!(second_map.tile(0, 0), first_map.tile(0, 0));
+    assert_eq!(tile_class(&second_map, 1, 0)?, ContentClass::Gradient);
+    assert_eq!(second_map.class_changes_since(&first_map), 1);
+    // A full analysis of the same frame agrees: the
+    // dirty-restricted map is not a different answer.
+    let full = analyzer.analyze(&second, &[], Some(&first_map));
+    assert_eq!(second_map, full);
+    Ok(())
+}
+
+#[test]
+fn class_change_halo_invalidates_neighbors() -> Result<(), String> {
+    let analyzer = RegionAnalyzer::default();
+    let profile = RoutingProfile::default();
+    let first = three_flat_frame()?;
+    let first_map = analyzer.analyze(&first, &[], None);
+    let second = flat_text_flat_frame()?;
+    let diff = DirtySet::diff(&first, &second);
+    let second_map = analyzer.analyze_dirty(&second, &diff, &[], Some(&first_map));
+    assert_eq!(tile_class(&second_map, 1, 0)?, ContentClass::Text);
+    assert_eq!(second_map.class_changes_since(&first_map), 1);
+    // The changed tile routes to the text branch, so its
+    // halo covers the tile and both neighbors: the branch
+    // reads 1 pixel across each edge.
+    let halos = second_map.class_change_halos(&first_map, &profile);
+    assert_eq!(halos.count(), 3);
+    assert!(halos.is_dirty(0, 0));
+    assert!(halos.is_dirty(1, 0));
+    assert!(halos.is_dirty(2, 0));
+    // A frame with no class change invalidates nothing.
+    let same = analyzer.analyze_dirty(
+        &second,
+        &DirtySet::diff(&second, &second),
+        &[],
+        Some(&second_map),
+    );
+    assert_eq!(same.class_change_halos(&second_map, &profile).count(), 0);
+    // A tile that changes class onto the general path gets
+    // no halo: the gradient tile's change invalidates
+    // nothing on its own.
+    let flat = text_and_flat_frame()?;
+    let flat_map = analyzer.analyze(&flat, &[], None);
+    let graded = text_and_gradient_frame()?;
+    let graded_map = analyzer.analyze_dirty(
+        &graded,
+        &DirtySet::diff(&flat, &graded),
+        &[],
+        Some(&flat_map),
+    );
+    assert_eq!(tile_class(&graded_map, 1, 0)?, ContentClass::Gradient);
+    assert_eq!(
+        graded_map.class_change_halos(&flat_map, &profile).count(),
+        0
+    );
     Ok(())
 }

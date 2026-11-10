@@ -5,9 +5,9 @@
 //! are test doubles, not product filters.
 
 use pixelflow_core::{
-    Frame, Graph, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, PixelFormat,
+    DirtySet, Frame, Graph, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, PixelFormat,
     ProcessError, Processor, ProcessorNode, Source, SpatialDependency, StrideSupport,
-    TemporalDependency,
+    TemporalDependency, TileGrid, TileRouting,
 };
 
 /// Build a tight RGB8 frame for a test.
@@ -970,4 +970,104 @@ fn incremental_static_frame_matches_whole_frame_run() -> Result<(), String> {
         assert_eq!(outputs[0].1.data(), expected.data());
     }
     Ok(())
+}
+
+#[test]
+fn tile_routing_records_branches_per_tile() {
+    let grid = TileGrid::from_dims(32, 32);
+    let mut routing = TileRouting::empty(grid);
+    assert_eq!(routing.grid(), grid);
+    assert_eq!(routing.routed_count(), 0);
+    assert_eq!(routing.branch_for(0, 0), None);
+    routing.set_branch(0, 0, Some("text"));
+    routing.set_branch(1, 1, Some("sprite"));
+    assert_eq!(routing.branch_for(0, 0), Some("text"));
+    assert_eq!(routing.branch_for(1, 1), Some("sprite"));
+    assert_eq!(routing.branch_for(1, 0), None);
+    assert_eq!(routing.routed_count(), 2);
+    routing.set_branch(0, 0, None);
+    assert_eq!(routing.branch_for(0, 0), None);
+    assert_eq!(routing.routed_count(), 1);
+    // Out-of-range tiles route nowhere and are ignored.
+    assert_eq!(routing.branch_for(2, 0), None);
+    routing.set_branch(2, 0, Some("text"));
+    assert_eq!(routing.routed_count(), 1);
+}
+
+#[test]
+fn graph_routes_branches_and_general_to_nodes() -> Result<(), String> {
+    let mut builder = GraphBuilder::new();
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("double", Box::new(doubler_node()))
+            .connect(Source::input("in"), "double", "in")
+            .route_branch("text", "double")
+            .route_general("double")
+            .add_output("out", "double", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
+    // No routing set yet: no tile resolves to a node.
+    assert_eq!(graph.node_for_tile(0, 0), None);
+    assert_eq!(graph.routing(), None);
+    let grid = TileGrid::from_dims(32, 32);
+    let mut routing = TileRouting::empty(grid);
+    routing.set_branch(0, 0, Some("text"));
+    let mut invalidated = DirtySet::empty(grid);
+    invalidated.mark(0, 0);
+    graph.set_routing(routing, invalidated);
+    // The text tile resolves through its branch, the flat
+    // tile through the general path, both to the same node.
+    assert_eq!(graph.node_for_tile(0, 0), Some("double"));
+    assert_eq!(graph.node_for_tile(1, 0), Some("double"));
+    // A branch with no route falls back to the general path.
+    assert_eq!(graph.node_for_branch(Some("sprite")), Some("double"));
+    assert_eq!(graph.node_for_branch(None), Some("double"));
+    // An out-of-range tile resolves to no node.
+    assert_eq!(graph.node_for_tile(2, 0), None);
+    let stored = graph
+        .routing()
+        .ok_or_else(|| "graph has no routing after set_routing".to_string())?;
+    assert_eq!(stored.branch_for(0, 0), Some("text"));
+    assert_eq!(stored.routed_count(), 1);
+    let dirty = graph
+        .routing_invalidated()
+        .ok_or_else(|| "graph has no invalidation after set_routing".to_string())?;
+    assert_eq!(dirty.count(), 1);
+    assert!(dirty.is_dirty(0, 0));
+    Ok(())
+}
+
+#[test]
+fn build_rejects_routes_to_unknown_nodes() {
+    let mut builder = GraphBuilder::new();
+    assert_eq!(
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .route_branch("text", "ghost")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
+        Err(GraphError::UnknownNode("ghost".to_string()))
+    );
+
+    let mut builder = GraphBuilder::new();
+    assert_eq!(
+        std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("double", Box::new(doubler_node()))
+                .connect(Source::input("in"), "double", "in")
+                .route_general("ghost")
+                .add_output("out", "double", "out"),
+        )
+        .build()
+        .map(|_| ()),
+        Err(GraphError::UnknownNode("ghost".to_string()))
+    );
 }

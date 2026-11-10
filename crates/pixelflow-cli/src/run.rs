@@ -4,7 +4,8 @@
 //!
 //! The work splits across two threads. The processing thread owns the
 //! capture backend, the child process, and the processing graph: it
-//! pulls frames, runs each through the graph's single contour node,
+//! pulls frames, region-analyzes each one restricted to the tiles whose pixels changed, hands the
+//! routes to the graph, runs each through the graph's single contour node,
 //! and publishes the newest to a replaceable frame slot. A
 //! newer frame replaces one still waiting in the slot, so the
 //! presentation window always draws the freshest frame and latency
@@ -25,8 +26,12 @@
 
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
-use pixelflow_core::{Frame, FrameSlot, Graph, GraphBuilder, GraphError, PixelFormat, Source};
+use pixelflow_core::{
+    DirtySet, Frame, FrameSlot, Graph, GraphBuilder, GraphError, PixelFormat, Source, TileGrid,
+    TileRouting,
+};
 use pixelflow_present::{PresentLoop, PresentUserEvent};
+use pixelflow_processing::region_analysis::{RegionAnalyzer, RegionMap, Route, RoutingProfile};
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,9 +144,11 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
 /// graph input, exposing the node's output. The node declares
 /// the Global spatial dependency, so the graph runs it
 /// whole-frame; there is no tile-level incremental claim for
-/// it. Built fresh in the processing thread, which owns the
-/// graph exactly as it owns the capture backend and the child
-/// process.
+/// it. The text and sprite branches and the general path all
+/// route to the contour node: no per-branch processors exist
+/// yet, so routing changes no pixels. Built fresh in the
+/// processing thread, which owns the graph exactly as it owns
+/// the capture backend and the child process.
 ///
 /// # Errors
 ///
@@ -149,28 +156,115 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
 /// validate, which means a programming error in this function.
 fn build_contour_graph(scale: u32) -> Result<Graph, GraphError> {
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("contour", crate::contour_node_from_env(scale));
-    builder.connect(Source::input("in"), "contour", "in");
-    builder.add_output("out", "contour", "out");
-    builder.build()
+    // `build` takes the builder by value, so the chained
+    // `&mut Self` is moved out with `take`, not discarded:
+    // the same shape as the graph tests.
+    std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("contour", crate::contour_node_from_env(scale))
+            .connect(Source::input("in"), "contour", "in")
+            .route_branch("text", "contour")
+            .route_branch("sprite", "contour")
+            .route_general("contour")
+            .add_output("out", "contour", "out"),
+    )
+    .build()
+}
+
+/// Per-frame region state for the live path: the analyzer, the
+/// routing profile, and the previous frame and map. One value
+/// lives in the processing thread for the whole run; it is not
+/// shared with the presentation thread.
+#[derive(Default)]
+struct FrameRouting {
+    /// The analyzer that classifies tiles.
+    analyzer: RegionAnalyzer,
+    /// Which branch each class routes to.
+    profile: RoutingProfile,
+    /// The previous frame, for the dirty-set diff.
+    previous_frame: Option<Frame>,
+    /// The previous frame's region map, for dirty-restricted
+    /// analysis and class-change halos.
+    previous_map: Option<RegionMap>,
+}
+
+impl FrameRouting {
+    /// Analyze `frame` into a region map and hand its routes
+    /// and halo invalidation to `graph`, then retain the frame
+    /// and map for the next frame.
+    ///
+    /// Analysis is dirty-restricted: only tiles whose pixels
+    /// changed since the previous frame are re-analyzed, and
+    /// clean tiles carry their previous classification
+    /// forward. The first frame has no previous frame, so
+    /// every tile is dirty and analyzed. The invalidation set
+    /// is the pixel dirty set plus the halo around tiles that
+    /// changed class into a routed branch, so neighbors a
+    /// branch reads across are re-processed with the tile.
+    /// The frame is cloned once to retain it for the next
+    /// frame's diff: the graph still receives the original by
+    /// value, and the clone is the retention cost of
+    /// dirty-restricted analysis.
+    fn route_frame(&mut self, graph: &mut Graph, frame: &Frame) {
+        let grid = TileGrid::from_dims(frame.width(), frame.height());
+        let dirty = match &self.previous_frame {
+            Some(previous) => DirtySet::diff(previous, frame),
+            None => DirtySet::whole(grid),
+        };
+        let map = self
+            .analyzer
+            .analyze_dirty(frame, &dirty, &[], self.previous_map.as_ref());
+        let invalidated = match &self.previous_map {
+            Some(previous) => dirty.union(&map.class_change_halos(previous, &self.profile)),
+            None => dirty,
+        };
+        let routes = map.routes(&self.profile);
+        let mut routing = TileRouting::empty(grid);
+        let mut index = 0_usize;
+        for ty in 0..grid.rows() {
+            for tx in 0..grid.cols() {
+                if let Some(route) = routes.get(index) {
+                    let branch = match route.route {
+                        Route::Branch(name) => Some(name),
+                        Route::General => None,
+                    };
+                    routing.set_branch(tx, ty, branch);
+                }
+                index += 1;
+            }
+        }
+        graph.set_routing(routing, invalidated);
+        self.previous_map = Some(map);
+        self.previous_frame = Some(frame.clone());
+    }
 }
 
 /// Run one captured frame through `graph` and return the
-/// processed frame. Ownership moves in and out with no frame
-/// cloned on either side: [`Graph::run`] takes the input frame
-/// by value, drops it once the node has consumed it, and
-/// returns the output frame by value. The incremental executor
-/// is deliberately not used here: with a single Global node it
-/// would diff the whole frame, retain the previous frame and a
-/// cached output, and clone the output, for output identical
-/// to this whole-frame run.
+/// processed frame. Routing runs first: `routing` analyzes
+/// the frame dirty-restricted and hands its routes and halo
+/// invalidation to the graph, so the graph knows the routing
+/// of the frame it is about to run. Ownership of the frame
+/// then moves into [`Graph::run`], which takes it by value,
+/// drops it once the node has consumed it, and returns the
+/// output frame by value. The routing keeps one retained copy
+/// of the frame for the next frame's diff; that clone is the
+/// retention cost of dirty-restricted analysis. The
+/// incremental executor is deliberately not used here: with a
+/// single Global node it would diff the whole frame, retain
+/// the previous frame and a cached output, and clone the
+/// output, for output identical to this whole-frame run.
 ///
 /// # Errors
 ///
 /// Returns [`GraphError`] when the frame is not RGB8 or the
 /// contour node fails.
-fn process_frame(graph: &mut Graph, frame: Frame) -> Result<Frame, GraphError> {
+fn process_frame(
+    graph: &mut Graph,
+    frame: Frame,
+    routing: &mut FrameRouting,
+) -> Result<Frame, GraphError> {
+    routing.route_frame(graph, &frame);
     let mut outputs = graph.run(vec![("in", frame)])?;
     match outputs.pop() {
         Some((_, frame)) => Ok(frame),
@@ -197,9 +291,10 @@ fn run_processing(
     let mut result: Result<(), String> = Ok(());
     match build_contour_graph(scale) {
         Ok(mut graph) => {
+            let mut routing = FrameRouting::default();
             while !exit.load(Ordering::Relaxed) {
                 match backend.capture_frame() {
-                    Ok(Some(frame)) => match process_frame(&mut graph, frame) {
+                    Ok(Some(frame)) => match process_frame(&mut graph, frame, &mut routing) {
                         Ok(processed) => {
                             slot.publish(processed);
                             if !wake() {
@@ -260,6 +355,68 @@ mod tests {
     use super::*;
     use pixelflow_core::Processor;
     use pixelflow_processing::Contour;
+    use pixelflow_processing::region_analysis::ContentClass;
+
+    /// Build an RGB8 frame from a per-pixel function.
+    fn pixel_frame(
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 3],
+    ) -> Result<Frame, String> {
+        let mut data = Vec::with_capacity(width as usize * height as usize * 3);
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&pixel(x, y));
+            }
+        }
+        Frame::new(width, height, PixelFormat::Rgb8, data).map_err(|e| e.to_string())
+    }
+
+    /// True when the pixel is ink in the text tile's bars, in
+    /// tile-local coordinates.
+    fn text_tile_ink(x: u32, y: u32) -> bool {
+        (x == 1 && (2..11).contains(&y))
+            || (x == 5 && (2..8).contains(&y))
+            || (x == 9 && (5..14).contains(&y))
+            || (x == 13 && (4..15).contains(&y))
+    }
+
+    /// A 32x16 frame: a text tile on the left, a flat tile on
+    /// the right.
+    fn text_and_flat_frame() -> Result<Frame, String> {
+        pixel_frame(32, 16, |x, y| {
+            if x < 16 {
+                if text_tile_ink(x, y) {
+                    [20, 20, 20]
+                } else {
+                    [240, 240, 240]
+                }
+            } else {
+                [200, 30, 90]
+            }
+        })
+    }
+
+    /// A 48x16 frame: three flat tiles.
+    fn three_flat_frame() -> Result<Frame, String> {
+        pixel_frame(48, 16, |_, _| [200, 30, 90])
+    }
+
+    /// The same frame with the middle tile replaced by the
+    /// text tile's bars.
+    fn flat_text_flat_frame() -> Result<Frame, String> {
+        pixel_frame(48, 16, |x, y| {
+            if (16..32).contains(&x) {
+                if text_tile_ink(x - 16, y) {
+                    [20, 20, 20]
+                } else {
+                    [240, 240, 240]
+                }
+            } else {
+                [200, 30, 90]
+            }
+        })
+    }
 
     #[test]
     fn unsupported_scale_fails_before_launching() {
@@ -311,10 +468,96 @@ mod tests {
         let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
         let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
         let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
-        let processed = process_frame(&mut graph, frame).map_err(|e| e.to_string())?;
+        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
+            .map_err(|e| e.to_string())?;
         assert_eq!((processed.width(), processed.height()), (8, 8));
         assert_eq!(processed.format(), PixelFormat::Rgb8);
         assert_eq!(processed.data(), direct.data());
+        Ok(())
+    }
+
+    #[test]
+    fn routed_frame_resolves_all_routes_to_contour() -> Result<(), String> {
+        let frame = text_and_flat_frame()?;
+        let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let mut routing = FrameRouting::default();
+        let processed =
+            process_frame(&mut graph, frame, &mut routing).map_err(|e| e.to_string())?;
+        // Routing changes no pixels: every route resolves to
+        // the contour node.
+        assert_eq!(processed.data(), direct.data());
+        let table = graph
+            .routing()
+            .ok_or_else(|| "graph has no routing after a routed frame".to_string())?;
+        assert_eq!(table.branch_for(0, 0), Some("text"));
+        assert_eq!(table.branch_for(1, 0), None);
+        assert_eq!(table.routed_count(), 1);
+        assert_eq!(graph.node_for_tile(0, 0), Some("contour"));
+        assert_eq!(graph.node_for_tile(1, 0), Some("contour"));
+        // First frame: every tile is dirty.
+        let invalidated = graph
+            .routing_invalidated()
+            .ok_or_else(|| "graph has no invalidation after a routed frame".to_string())?;
+        assert_eq!(invalidated.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn second_frame_reuses_prior_classes_and_halo_invalidates() -> Result<(), String> {
+        let mut graph = build_contour_graph(2).map_err(|e| e.to_string())?;
+        let mut routing = FrameRouting::default();
+        let first = three_flat_frame()?;
+        process_frame(&mut graph, first, &mut routing).map_err(|e| e.to_string())?;
+        let first_map = routing
+            .previous_map
+            .clone()
+            .ok_or_else(|| "no region map after the first frame".to_string())?;
+        assert_eq!(
+            first_map.tile(1, 0).map(|tile| tile.class),
+            Some(ContentClass::Flat)
+        );
+        // Only the middle tile changes, into a text tile.
+        let second = flat_text_flat_frame()?;
+        let second_again = second.clone();
+        let direct = Contour.process(&second, 2).map_err(|e| e.to_string())?;
+        let processed =
+            process_frame(&mut graph, second, &mut routing).map_err(|e| e.to_string())?;
+        assert_eq!(processed.data(), direct.data());
+        let second_map = routing
+            .previous_map
+            .as_ref()
+            .ok_or_else(|| "no region map after the second frame".to_string())?;
+        // The clean tiles are carried forward exactly; the
+        // dirty tile is reclassified as text.
+        assert_eq!(second_map.tile(0, 0), first_map.tile(0, 0));
+        assert_eq!(second_map.tile(2, 0), first_map.tile(2, 0));
+        assert_eq!(
+            second_map.tile(1, 0).map(|tile| tile.class),
+            Some(ContentClass::Text)
+        );
+        assert_eq!(second_map.class_changes_since(&first_map), 1);
+        // The class change invalidates the tile and its halo:
+        // the pixel dirty set holds the middle tile, the halo
+        // adds both neighbors.
+        let invalidated = graph
+            .routing_invalidated()
+            .ok_or_else(|| "graph has no invalidation after the second frame".to_string())?;
+        assert_eq!(invalidated.count(), 3);
+        assert!(invalidated.is_dirty(0, 0));
+        assert!(invalidated.is_dirty(1, 0));
+        assert!(invalidated.is_dirty(2, 0));
+        // An identical third frame invalidates nothing.
+        let direct = Contour
+            .process(&second_again, 2)
+            .map_err(|e| e.to_string())?;
+        let processed =
+            process_frame(&mut graph, second_again, &mut routing).map_err(|e| e.to_string())?;
+        assert_eq!(processed.data(), direct.data());
+        let invalidated = graph
+            .routing_invalidated()
+            .ok_or_else(|| "graph has no invalidation after the third frame".to_string())?;
+        assert_eq!(invalidated.count(), 0);
         Ok(())
     }
 }
