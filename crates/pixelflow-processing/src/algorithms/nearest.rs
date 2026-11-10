@@ -18,6 +18,13 @@ impl Processor for Nearest {
         &[2, 4]
     }
 
+    /// Nearest-neighbour scaling is tile-safe: each output pixel
+    /// copies one input pixel, so a cropped run produces exactly
+    /// the corresponding crop of the whole-frame output.
+    fn tile_safe(&self) -> bool {
+        true
+    }
+
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
         if !self.supported_scales().contains(&scale) {
             return Err(ProcessError::UnsupportedScale {

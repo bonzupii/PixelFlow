@@ -191,18 +191,44 @@ impl Frame {
 
     /// Build a frame filled with one repeated byte value, tightly
     /// packed. The timestamp is now and the sequence is 0.
-    #[must_use]
-    pub fn filled(width: u32, height: u32, format: PixelFormat, value: u8) -> Frame {
-        let len = width as usize * height as usize * format.bytes_per_pixel();
-        Frame {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError`] when the size computation
+    /// overflows, or when the frame would not fit in a single
+    /// allocation.
+    pub fn filled(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        value: u8,
+    ) -> Result<Frame, FrameError> {
+        let row_bytes = (width as usize)
+            .checked_mul(format.bytes_per_pixel())
+            .ok_or_else(|| FrameError {
+                message: format!("row size overflows for {width}x{height} {format}"),
+            })?;
+        let len = row_bytes
+            .checked_mul(height as usize)
+            .ok_or_else(|| FrameError {
+                message: format!("frame size overflows for {width}x{height} {format}"),
+            })?;
+        if len > isize::MAX as usize {
+            return Err(FrameError {
+                message: format!(
+                    "frame size {len} exceeds the maximum single allocation for {width}x{height} {format}"
+                ),
+            });
+        }
+        Ok(Frame {
             width,
             height,
             format,
-            stride: width as usize * format.bytes_per_pixel(),
+            stride: row_bytes,
             timestamp: Instant::now(),
             sequence: 0,
             data: vec![value; len],
-        }
+        })
     }
 
     /// Bytes per pixel, from the format.
@@ -484,11 +510,40 @@ mod tests {
     }
 
     #[test]
-    fn pixel_round_trip() {
-        let mut f = Frame::filled(2, 1, PixelFormat::Rgb8, 0);
+    fn pixel_round_trip() -> Result<(), String> {
+        let mut f = Frame::filled(2, 1, PixelFormat::Rgb8, 0).map_err(|e| e.to_string())?;
         f.pixel_mut(1, 0).copy_from_slice(&[10, 20, 30]);
         assert_eq!(f.pixel(1, 0), &[10, 20, 30]);
         assert_eq!(f.pixel(0, 0), &[0, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn filled_rejects_overflow_dimensions() {
+        // Rgb8 and Rgba8 at u32::MAX square overflow the size
+        // arithmetic itself; Gray8 fits in u64 but exceeds the
+        // single-allocation limit. None of these allocates.
+        for format in [PixelFormat::Rgb8, PixelFormat::Rgba8, PixelFormat::Gray8] {
+            let result = Frame::filled(u32::MAX, u32::MAX, format, 0);
+            assert!(result.is_err());
+            if let Err(err) = result {
+                assert!(err.message.contains("overflows") || err.message.contains("exceeds"));
+            }
+        }
+    }
+
+    #[test]
+    fn filled_succeeds_at_fitting_sizes() -> Result<(), String> {
+        let frame = Frame::filled(2, 1, PixelFormat::Rgb8, 7).map_err(|e| e.to_string())?;
+        assert_eq!(frame.data(), vec![7, 7, 7, 7, 7, 7]);
+        assert_eq!(frame.stride(), 6);
+        assert!(frame.is_tight());
+        let empty = Frame::filled(0, 0, PixelFormat::Rgb8, 0).map_err(|e| e.to_string())?;
+        assert_eq!(empty.data().len(), 0);
+        assert_eq!(empty.stride(), 0);
+        let frame = Frame::filled(256, 224, PixelFormat::Rgb8, 0).map_err(|e| e.to_string())?;
+        assert_eq!(frame.data().len(), 256 * 224 * 3);
+        Ok(())
     }
 
     #[test]

@@ -5,8 +5,9 @@
 //! are test doubles, not product filters.
 
 use pixelflow_core::{
-    Frame, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, PixelFormat, ProcessError,
-    Processor, ProcessorNode, Source, SpatialDependency, StrideSupport, TemporalDependency,
+    Frame, Graph, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, PixelFormat,
+    ProcessError, Processor, ProcessorNode, Source, SpatialDependency, StrideSupport,
+    TemporalDependency,
 };
 
 /// Build a tight RGB8 frame for a test.
@@ -24,6 +25,14 @@ impl Processor for Doubler {
 
     fn supported_scales(&self) -> &[u32] {
         &[2]
+    }
+
+    /// The double is nearest-neighbour 2x: each output pixel
+    /// copies one input pixel, so a cropped run produces exactly
+    /// the corresponding crop of the whole-frame output. This is
+    /// what the incremental executor's tile path runs on.
+    fn tile_safe(&self) -> bool {
+        true
     }
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
@@ -756,6 +765,139 @@ fn misbehaving_nodes_are_rejected() -> Result<(), String> {
                 })
             ),
         }
+    }
+    Ok(())
+}
+
+/// One-node graph over the tile-safe `Doubler` at the given
+/// spatial dependency, for the incremental tests.
+fn incremental_graph(dependency: SpatialDependency) -> Result<Graph, String> {
+    let mut builder = GraphBuilder::new();
+    builder.add_input("in", PixelFormat::Rgb8);
+    builder.add_node(
+        "double",
+        Box::new(ProcessorNode::new(Doubler, 2, dependency)),
+    );
+    builder.connect(Source::input("in"), "double", "in");
+    builder.add_output("out", "double", "out");
+    builder.build().map_err(|e| e.to_string())
+}
+
+/// A frame whose pixels vary by position, so a changed pixel is
+/// a real change and the doubled output is not uniform.
+fn pattern_frame(width: u32, height: u32) -> Result<Frame, String> {
+    let mut data = Vec::with_capacity(width as usize * height as usize * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let v = ((x * 7 + y * 13) % 251) as u8;
+            data.extend_from_slice(&[v, (v / 2) as u8, (255 - v) as u8]);
+        }
+    }
+    rgb_frame(width, height, data)
+}
+
+/// The same pattern frame with one pixel replaced by a value
+/// that differs from the pattern there.
+fn pattern_frame_changed(width: u32, height: u32, x: u32, y: u32) -> Result<Frame, String> {
+    let mut frame = pattern_frame(width, height)?;
+    let old = frame.pixel(x, y).to_vec();
+    let new = [
+        old[0].wrapping_add(100),
+        old[1].wrapping_add(100),
+        old[2].wrapping_add(100),
+    ];
+    frame.pixel_mut(x, y).copy_from_slice(&new);
+    Ok(frame)
+}
+
+/// Whole-frame reference for a frame: a fresh graph's `run`.
+fn whole_frame_output(frame: Frame, dependency: SpatialDependency) -> Result<Frame, String> {
+    let mut graph = incremental_graph(dependency)?;
+    let mut outputs = graph.run(vec![("in", frame)]).map_err(|e| e.to_string())?;
+    assert_eq!(outputs.len(), 1);
+    Ok(outputs.remove(0).1)
+}
+
+#[test]
+fn incremental_first_run_matches_whole_frame_run() -> Result<(), String> {
+    for dependency in [SpatialDependency::Local, SpatialDependency::Global] {
+        let frame = pattern_frame(32, 32)?;
+        let expected = whole_frame_output(frame.clone(), dependency)?;
+        let mut graph = incremental_graph(dependency)?;
+        let outputs = graph
+            .run_incremental(vec![("in", frame)])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].1.data(), expected.data());
+    }
+    Ok(())
+}
+
+#[test]
+fn incremental_changed_tile_matches_whole_frame_run() -> Result<(), String> {
+    for dependency in [SpatialDependency::Local, SpatialDependency::Global] {
+        let first = pattern_frame(32, 32)?;
+        // One pixel changed inside tile (1, 0), and one on the
+        // tile boundary at (16, 0): both must land in exactly
+        // the changed tiles' output.
+        let second = pattern_frame_changed(32, 32, 20, 5)?;
+        let third = pattern_frame_changed(32, 32, 16, 0)?;
+        let expected_second = whole_frame_output(second.clone(), dependency)?;
+        let expected_third = whole_frame_output(third.clone(), dependency)?;
+        let mut graph = incremental_graph(dependency)?;
+        let out_first = graph
+            .run_incremental(vec![("in", first)])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(
+            out_first[0].1.data(),
+            whole_frame_output(pattern_frame(32, 32)?, dependency)?.data()
+        );
+        let out_second = graph
+            .run_incremental(vec![("in", second)])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(out_second[0].1.data(), expected_second.data());
+        let out_third = graph
+            .run_incremental(vec![("in", third)])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(out_third[0].1.data(), expected_third.data());
+    }
+    Ok(())
+}
+
+#[test]
+fn incremental_changed_edge_tile_matches_whole_frame_run() -> Result<(), String> {
+    // 20x20: the edge tiles are partial (4 pixels wide), and a
+    // change in the bottom-right edge tile must still splice
+    // exactly.
+    let first = pattern_frame(20, 20)?;
+    let second = pattern_frame_changed(20, 20, 19, 19)?;
+    let expected = whole_frame_output(second.clone(), SpatialDependency::Local)?;
+    let mut graph = incremental_graph(SpatialDependency::Local)?;
+    graph
+        .run_incremental(vec![("in", first)])
+        .map_err(|e| e.to_string())?;
+    let outputs = graph
+        .run_incremental(vec![("in", second)])
+        .map_err(|e| e.to_string())?;
+    assert_eq!(outputs[0].1.data(), expected.data());
+    Ok(())
+}
+
+#[test]
+fn incremental_static_frame_matches_whole_frame_run() -> Result<(), String> {
+    for dependency in [SpatialDependency::Local, SpatialDependency::Global] {
+        let frame = pattern_frame(32, 32)?;
+        let expected = whole_frame_output(frame.clone(), dependency)?;
+        let mut graph = incremental_graph(dependency)?;
+        graph
+            .run_incremental(vec![("in", frame.clone())])
+            .map_err(|e| e.to_string())?;
+        // Same pixels, fresh frame: nothing is dirty, so the
+        // node is skipped and the cached output stands.
+        let outputs = graph
+            .run_incremental(vec![("in", frame)])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(outputs[0].1.data(), expected.data());
     }
     Ok(())
 }

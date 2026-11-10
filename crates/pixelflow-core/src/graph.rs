@@ -19,7 +19,8 @@
 //! here, without changing the graph structure or the node trait.
 
 use crate::format::PixelFormat;
-use crate::frame::Frame;
+use crate::frame::{Frame, FrameError};
+use crate::incremental::{DirtySet, TileGrid, integer_scale, propagate};
 use crate::pipeline::{ProcessError, Processor, StrideSupport};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -95,6 +96,22 @@ pub trait Node {
     /// and the executor packs its input before running it.
     fn stride_support(&self) -> StrideSupport {
         StrideSupport::Any
+    }
+
+    /// Whether this node can run on a cropped input frame and
+    /// produce exactly the corresponding crop of its
+    /// whole-frame output. The default is `false`: the executor
+    /// runs the node whole-frame and reads dirty tiles from that
+    /// output. A node overrides this only when the cropped run
+    /// is exact for its declared spatial dependency — a local
+    /// node whose output pixel copies one input pixel qualifies;
+    /// a node whose edge handling clamps to the frame boundary
+    /// does not, because a crop would clamp to the crop
+    /// boundary instead. The incremental executor only ever
+    /// crops local tile-safe nodes; neighborhood and global
+    /// nodes always run whole-frame when dirty.
+    fn tile_safe(&self) -> bool {
+        false
     }
 
     /// Run the node on its inputs and produce its outputs. Every
@@ -228,6 +245,10 @@ impl<P: Processor> Node for ProcessorNode<P> {
 
     fn stride_support(&self) -> StrideSupport {
         self.processor.stride_support()
+    }
+
+    fn tile_safe(&self) -> bool {
+        self.processor.tile_safe()
     }
 
     fn run(&mut self, inputs: &NodeInputs<'_>) -> Result<NodeOutputs, ProcessError> {
@@ -547,6 +568,8 @@ impl GraphBuilder {
             consumers,
             outputs: graph_outputs,
             order,
+            prev_inputs: HashMap::new(),
+            node_caches: HashMap::new(),
         })
     }
 
@@ -853,6 +876,18 @@ pub struct Graph {
     outputs: Vec<(String, Slot)>,
     /// Node indexes in topological order.
     order: Vec<usize>,
+    /// Previous frame per graph input port, for dirty-region
+    /// detection in [`Graph::run_incremental`]. Empty until the
+    /// first incremental run; cleared by [`Graph::run`], so a
+    /// whole-frame run resets incremental state and the next
+    /// incremental run starts from first-frame behavior.
+    prev_inputs: HashMap<String, Frame>,
+    /// Cached output frame per node-output slot: the per-node
+    /// tile caches. A node's cache holds its last output frame
+    /// in full; the dirty set recorded for the slot says which
+    /// of its tiles the next run may treat as stale. Cleared by
+    /// [`Graph::run`] together with `prev_inputs`.
+    node_caches: HashMap<Slot, Frame>,
 }
 
 impl Graph {
@@ -870,6 +905,12 @@ impl Graph {
     /// duplicated, or wrongly formatted graph input, or when a
     /// node fails.
     pub fn run(&mut self, inputs: Vec<(&str, Frame)>) -> Result<Vec<(String, Frame)>, GraphError> {
+        // A whole-frame run resets incremental state, so mixing
+        // `run` and `run_incremental` on one graph stays safe:
+        // the next incremental run starts from first-frame
+        // behavior and rebuilds every cache.
+        self.prev_inputs.clear();
+        self.node_caches.clear();
         let mut slots = self.load_inputs(inputs)?;
         let mut remaining = self.consumers.clone();
         // Copy the order: executing a node borrows the graph
@@ -886,6 +927,104 @@ impl Graph {
                 .ok_or_else(|| GraphError::Internal(format!("graph output {name} has no frame")))?;
             outputs.push((name.clone(), frame));
         }
+        Ok(outputs)
+    }
+
+    /// Run the graph incrementally on `inputs`: compare each
+    /// input with the previous frame, propagate the dirty tiles
+    /// through the graph by each node's declared dependency,
+    /// skip nodes whose output dirty set is empty, and reuse
+    /// their cached outputs. A tile-safe local node reruns only
+    /// its dirty tiles, from cropped inputs; every other dirty
+    /// node reruns whole-frame. The output is exactly the
+    /// whole-frame output: cached tiles are byte-identical to
+    /// what a fresh run would produce, because a tile leaves
+    /// the dirty set only when no input pixel it depends on
+    /// changed.
+    ///
+    /// The first incremental run has no previous frame, so
+    /// every input is wholly dirty and every node runs
+    /// whole-frame and fills its cache. A resolution or format
+    /// change is wholly dirty the same way. A failed run leaves
+    /// no partial state: the caches and previous frames are
+    /// cleared, so the next run starts from first-frame
+    /// behavior. Node parameters are fixed for the graph's
+    /// lifetime — a caller that changes a node's parameters
+    /// builds a new graph, since the executor has no hook that
+    /// reports a parameter change. Graph outputs are stamped
+    /// with the first graph input's timestamp and sequence, so
+    /// a partially updated frame still carries the current
+    /// frame's capture metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GraphError`] for a missing, unexpected,
+    /// duplicated, or wrongly formatted graph input, or when a
+    /// node fails — the same errors as [`Graph::run`].
+    pub fn run_incremental(
+        &mut self,
+        inputs: Vec<(&str, Frame)>,
+    ) -> Result<Vec<(String, Frame)>, GraphError> {
+        let current = self.load_inputs(inputs)?;
+        let mut dirty: HashMap<Slot, DirtySet> = HashMap::new();
+        for (name, _) in &self.inputs {
+            let slot = Slot::GraphInput(name.clone());
+            let frame = current
+                .get(&slot)
+                .ok_or_else(|| GraphError::Internal(format!("graph input {name} has no frame")))?;
+            let set = match self.prev_inputs.get(name) {
+                Some(prev) => DirtySet::diff(prev, frame),
+                None => DirtySet::whole(TileGrid::from_dims(frame.width(), frame.height())),
+            };
+            dirty.insert(slot, set);
+        }
+        let order = self.order.clone();
+        for index in order {
+            let mut run = IncrementalRun {
+                inputs: &current,
+                caches: &mut self.node_caches,
+                dirty: &mut dirty,
+            };
+            if let Err(error) =
+                run_node_incremental(&mut run, &mut self.nodes[index], &self.feed[index], index)
+            {
+                // A failed incremental run leaves no partial
+                // state: the next run starts from first-frame
+                // behavior and rebuilds every cache.
+                self.prev_inputs.clear();
+                self.node_caches.clear();
+                return Err(error);
+            }
+        }
+        // Outputs are clones of the caches, stamped with the
+        // first graph input's capture metadata. A graph with no
+        // inputs has no metadata to stamp.
+        let stamp = self.inputs.first().and_then(|(name, _)| {
+            current
+                .get(&Slot::GraphInput(name.clone()))
+                .map(|frame| (frame.timestamp(), frame.sequence()))
+        });
+        let mut outputs: Vec<(String, Frame)> = Vec::with_capacity(self.outputs.len());
+        for (name, slot) in &self.outputs {
+            let frame = self
+                .node_caches
+                .get(slot)
+                .ok_or_else(|| GraphError::Internal(format!("graph output {name} has no frame")))?;
+            let mut frame = frame.clone();
+            if let Some((timestamp, sequence)) = stamp {
+                frame = frame.with_timestamp(timestamp).with_sequence(sequence);
+            }
+            outputs.push((name.clone(), frame));
+        }
+        // The current frames become the previous frames for the
+        // next run's comparison.
+        let mut prev: HashMap<String, Frame> = HashMap::new();
+        for (slot, frame) in current {
+            if let Slot::GraphInput(name) = slot {
+                prev.insert(name, frame);
+            }
+        }
+        self.prev_inputs = prev;
         Ok(outputs)
     }
 
@@ -987,4 +1126,411 @@ impl Graph {
         }
         Ok(())
     }
+}
+
+/// Shared state for one incremental node run: the current input
+/// frames, the per-node output caches, and the per-slot dirty
+/// sets. Grouped so the per-node helpers stay under the argument
+/// limit.
+struct IncrementalRun<'a> {
+    inputs: &'a HashMap<Slot, Frame>,
+    caches: &'a mut HashMap<Slot, Frame>,
+    dirty: &'a mut HashMap<Slot, DirtySet>,
+}
+
+/// One tile-safe run: which output slot the tiles fill, which
+/// of its tiles are dirty, the output tile grid, and the node's
+/// integer scale from input to output.
+struct TileRun<'a> {
+    out_slot: &'a Slot,
+    set: &'a DirtySet,
+    grid: TileGrid,
+    scale: u32,
+}
+
+/// One node's input for the incremental executor: the slot and
+/// port it feeds, the input frame's dimensions, and the input's
+/// dirty set. Dimensions and sets are owned, so no frame borrow
+/// is held while the cache is mutated below.
+type InputInfo = (Slot, &'static str, u32, u32, DirtySet);
+
+/// One node's propagated output: the output slot, its dirty
+/// set, and whether an output was cached at all. A port with no
+/// cache yet runs whole-frame and its dirty set is the whole
+/// fresh output, filled in after the run.
+type PropagatedSet = (Slot, DirtySet, bool);
+
+/// Gather one node's inputs: each feed slot's frame dimensions
+/// and dirty set.
+fn gather_input_infos(
+    run: &IncrementalRun<'_>,
+    name: &str,
+    feed: &[(Slot, &'static str)],
+) -> Result<Vec<InputInfo>, GraphError> {
+    let mut infos: Vec<InputInfo> = Vec::with_capacity(feed.len());
+    for (slot, port) in feed {
+        let frame = run
+            .inputs
+            .get(slot)
+            .or_else(|| run.caches.get(slot))
+            .ok_or_else(|| {
+                GraphError::Internal(format!("node {name} input {port} has no frame"))
+            })?;
+        let set = run
+            .dirty
+            .get(slot)
+            .ok_or_else(|| {
+                GraphError::Internal(format!("node {name} input {port} has no dirty set"))
+            })?
+            .clone();
+        infos.push((slot.clone(), *port, frame.width(), frame.height(), set));
+    }
+    Ok(infos)
+}
+
+/// One propagated dirty set per output port, from the cached
+/// output dims.
+fn propagate_node_outputs(
+    run: &IncrementalRun<'_>,
+    node: &dyn Node,
+    index: usize,
+    input_infos: &[InputInfo],
+) -> Vec<PropagatedSet> {
+    let mut propagated: Vec<PropagatedSet> = Vec::with_capacity(node.output_ports().len());
+    for port in node.output_ports() {
+        let slot = Slot::NodeOutput { node: index, port };
+        match run.caches.get(&slot) {
+            Some(cached) => {
+                let out_grid = TileGrid::from_dims(cached.width(), cached.height());
+                let mut set = DirtySet::empty(out_grid);
+                for (_, _, width, height, in_set) in input_infos {
+                    let part = propagate(
+                        node.spatial_dependency(),
+                        node.temporal_dependency(),
+                        in_set,
+                        (*width, *height),
+                        out_grid,
+                    );
+                    set = set.union(&part);
+                }
+                propagated.push((slot, set, true));
+            }
+            None => propagated.push((slot, DirtySet::empty(TileGrid::from_dims(0, 0)), false)),
+        }
+    }
+    propagated
+}
+
+/// Run one node incrementally: propagate its input dirty sets
+/// into one output dirty set per output port, skip the node
+/// when every set is empty, rerun only dirty tiles for a
+/// tile-safe local node, and otherwise rerun whole-frame. The
+/// cached output and the per-slot dirty sets are updated, so
+/// downstream nodes see exactly the tiles that may have
+/// changed. The input gathering and output validation mirror
+/// [`Graph::execute_node`]; the two stay separate because the
+/// whole-frame executor drops slots when consumers finish,
+/// while the incremental executor keeps caches across runs.
+fn run_node_incremental(
+    run: &mut IncrementalRun<'_>,
+    node_entry: &mut (String, Box<dyn Node>),
+    feed: &[(Slot, &'static str)],
+    index: usize,
+) -> Result<(), GraphError> {
+    let (name, node) = node_entry;
+    let input_infos = gather_input_infos(run, name, feed)?;
+    let propagated = propagate_node_outputs(run, &**node, index, &input_infos);
+    // Skip the node when every output is cached and clean: its
+    // cached outputs already equal a fresh run's.
+    if propagated
+        .iter()
+        .all(|(_, set, has_cache)| *has_cache && set.is_empty())
+    {
+        for (slot, set, _) in propagated {
+            run.dirty.insert(slot, set);
+        }
+        return Ok(());
+    }
+    // A tile-safe local node with one input, one output, and an
+    // integer scale reruns only its dirty tiles, from cropped
+    // inputs. A wholly dirty output is cheaper whole-frame than
+    // tile by tile, so it takes the whole-frame path below.
+    if node.output_ports().len() == 1
+        && feed.len() == 1
+        && node.tile_safe()
+        && node.spatial_dependency() == SpatialDependency::Local
+        && node.temporal_dependency() == TemporalDependency::Stateless
+    {
+        let (slot, set, has_cache) = &propagated[0];
+        if *has_cache && !set.is_empty() && set.count() < set.grid().tile_count() {
+            let (_, _, in_width, in_height, _) = input_infos[0];
+            let out_grid = set.grid();
+            if let Some(scale) =
+                integer_scale((in_width, in_height), (out_grid.width(), out_grid.height()))
+            {
+                let out_slot = slot.clone();
+                let set = set.clone();
+                let tile = TileRun {
+                    out_slot: slot,
+                    set: &set,
+                    grid: out_grid,
+                    scale,
+                };
+                run_node_tiles(run, name, node, feed, &tile)?;
+                run.dirty.insert(out_slot, set);
+                return Ok(());
+            }
+        }
+    }
+    run_node_whole_frame(run, name, node, feed, index, &propagated)
+}
+
+/// Whole-frame path: gather inputs (packing strided frames
+/// for a tight-only node), run the node, validate its outputs
+/// the same way `execute_node` does, and store them in the
+/// caches.
+fn run_node_whole_frame(
+    run: &mut IncrementalRun<'_>,
+    name: &str,
+    node: &mut Box<dyn Node>,
+    feed: &[(Slot, &'static str)],
+    index: usize,
+    propagated: &[PropagatedSet],
+) -> Result<(), GraphError> {
+    let produced = {
+        let mut node_inputs = NodeInputs { frames: Vec::new() };
+        for (slot, port) in feed {
+            let frame = run
+                .inputs
+                .get(slot)
+                .or_else(|| run.caches.get(slot))
+                .ok_or_else(|| {
+                    GraphError::Internal(format!("node {name} input {port} has no frame"))
+                })?;
+            let frame = if node.stride_support() == StrideSupport::TightOnly && !frame.is_tight() {
+                Cow::Owned(frame.packed().into_owned())
+            } else {
+                Cow::Borrowed(frame)
+            };
+            node_inputs.frames.push((*port, frame));
+        }
+        let result = node
+            .run(&node_inputs)
+            .map_err(|source| GraphError::NodeFailed {
+                node: name.to_string(),
+                source,
+            });
+        drop(node_inputs);
+        result?
+    };
+    let produced = produced.into_frames();
+    let mut seen: HashSet<&'static str> = HashSet::new();
+    for (port, frame) in produced {
+        if !node.output_ports().contains(&port) {
+            return Err(GraphError::NodeOutputUnknown {
+                node: name.to_string(),
+                port: port.to_string(),
+            });
+        }
+        if !seen.insert(port) {
+            return Err(GraphError::NodeOutputDuplicate {
+                node: name.to_string(),
+                port: port.to_string(),
+            });
+        }
+        let slot = Slot::NodeOutput { node: index, port };
+        let set = match propagated
+            .iter()
+            .find(|(candidate, _, _)| *candidate == slot)
+        {
+            Some((_, set, true)) => set.clone(),
+            _ => DirtySet::whole(TileGrid::from_dims(frame.width(), frame.height())),
+        };
+        run.dirty.insert(slot.clone(), set);
+        run.caches.insert(slot, frame);
+    }
+    for port in node.output_ports() {
+        if !seen.contains(port) {
+            return Err(GraphError::NodeOutputMissing {
+                node: name.to_string(),
+                port: (*port).to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Run a tile-safe local node once per dirty tile, on cropped
+/// inputs, and splice the tile outputs into the cached output
+/// frame. Two phases: the cropped runs borrow the input frame,
+/// so they all happen first and their outputs are collected;
+/// only then is the cache mutated, once no input borrow is
+/// live.
+fn run_node_tiles(
+    run: &mut IncrementalRun<'_>,
+    name: &str,
+    node: &mut Box<dyn Node>,
+    feed: &[(Slot, &'static str)],
+    tile: &TileRun<'_>,
+) -> Result<(), GraphError> {
+    let in_slot = feed[0].0.clone();
+    let in_port = feed[0].1;
+    let out_port = match tile.out_slot {
+        Slot::NodeOutput { port, .. } => *port,
+        Slot::GraphInput(_) => {
+            return Err(GraphError::Internal(format!(
+                "node {name} tile run has a graph-input output slot"
+            )));
+        }
+    };
+    // Phase 1: run the node once per dirty tile on cropped
+    // inputs, collecting the tile outputs.
+    let tile_outputs: Vec<(u32, u32, Frame)> = {
+        let in_frame = run
+            .inputs
+            .get(&in_slot)
+            .or_else(|| run.caches.get(&in_slot))
+            .ok_or_else(|| {
+                GraphError::Internal(format!("node {name} input {in_port} has no frame"))
+            })?;
+        let mut collected: Vec<(u32, u32, Frame)> = Vec::new();
+        for ty in 0..tile.grid.rows() {
+            for tx in 0..tile.grid.cols() {
+                if !tile.set.is_dirty(tx, ty) {
+                    continue;
+                }
+                let (ox0, oy0, ox1, oy1) = tile.grid.tile_rect(tx, ty);
+                let ix0 = ox0 / tile.scale;
+                let ix1 = ox1.div_ceil(tile.scale);
+                let iy0 = oy0 / tile.scale;
+                let iy1 = oy1.div_ceil(tile.scale);
+                let crop = crop_frame(in_frame, ix0, iy0, ix1, iy1).map_err(|error| {
+                    GraphError::Internal(format!("node {name} tile crop failed: {error}"))
+                })?;
+                let mut tile_inputs = NodeInputs { frames: Vec::new() };
+                tile_inputs.frames.push((in_port, Cow::Borrowed(&crop)));
+                let outputs = node
+                    .run(&tile_inputs)
+                    .map_err(|source| GraphError::NodeFailed {
+                        node: name.to_string(),
+                        source,
+                    })?;
+                drop(tile_inputs);
+                let produced = outputs.into_frames();
+                let mut found: Option<Frame> = None;
+                for (port, frame) in produced {
+                    if port == out_port {
+                        if found.is_some() {
+                            return Err(GraphError::NodeOutputDuplicate {
+                                node: name.to_string(),
+                                port: port.to_string(),
+                            });
+                        }
+                        found = Some(frame);
+                    } else {
+                        return Err(GraphError::NodeOutputUnknown {
+                            node: name.to_string(),
+                            port: port.to_string(),
+                        });
+                    }
+                }
+                let frame = found.ok_or_else(|| GraphError::NodeOutputMissing {
+                    node: name.to_string(),
+                    port: out_port.to_string(),
+                })?;
+                collected.push((tx, ty, frame));
+            }
+        }
+        collected
+    };
+    // Phase 2: splice the tile outputs into the cached output
+    // frame. No input borrow is live here.
+    let cached = run
+        .caches
+        .get_mut(tile.out_slot)
+        .ok_or_else(|| GraphError::Internal(format!("node {name} output has no cached frame")))?;
+    for (tx, ty, tile_frame) in tile_outputs {
+        blit_tile(name, cached, &tile_frame, tx, ty, tile.scale)?;
+    }
+    Ok(())
+}
+
+/// Crop a frame to the half-open pixel rectangle
+/// `(x0, y0, x1, y1)`, tightly packed, keeping the input's
+/// format, timestamp, and sequence. The rectangle must lie
+/// inside the frame.
+fn crop_frame(frame: &Frame, x0: u32, y0: u32, x1: u32, y1: u32) -> Result<Frame, FrameError> {
+    if x1 < x0 || y1 < y0 || x1 > frame.width() || y1 > frame.height() {
+        return Err(FrameError {
+            message: format!(
+                "crop ({x0},{y0})-({x1},{y1}) outside {}x{} frame",
+                frame.width(),
+                frame.height()
+            ),
+        });
+    }
+    let bpp = frame.bytes_per_pixel();
+    let mut data = Vec::with_capacity((x1 - x0) as usize * (y1 - y0) as usize * bpp);
+    for y in y0..y1 {
+        data.extend_from_slice(&frame.row(y)[x0 as usize * bpp..x1 as usize * bpp]);
+    }
+    Frame::new(x1 - x0, y1 - y0, frame.format(), data).map(|cropped| {
+        cropped
+            .with_timestamp(frame.timestamp())
+            .with_sequence(frame.sequence())
+    })
+}
+
+/// Copy one output tile from a cropped run's output into the
+/// cached output frame. The tile's output rectangle is
+/// `(tx*16, ty*16)` to `(tx*16+16, ty*16+16)` clamped to the
+/// cached frame; the cropped output starts at output pixel
+/// `(ix0*scale, iy0*scale)`, where `(ix0, iy0)` is the input
+/// footprint origin the caller cropped from, so the tile's
+/// pixels sit at offset `(ox0 - ix0*scale, oy0 - iy0*scale)`
+/// inside the cropped output.
+fn blit_tile(
+    name: &str,
+    cached: &mut Frame,
+    tile: &Frame,
+    tx: u32,
+    ty: u32,
+    scale: u32,
+) -> Result<(), GraphError> {
+    if tile.format() != cached.format() {
+        return Err(GraphError::Internal(format!(
+            "node {name} tile output is {}, cached output is {}",
+            tile.format(),
+            cached.format()
+        )));
+    }
+    let grid = TileGrid::from_dims(cached.width(), cached.height());
+    let (ox0, oy0, ox1, oy1) = grid.tile_rect(tx, ty);
+    if ox1 <= ox0 || oy1 <= oy0 {
+        return Ok(());
+    }
+    let ix0 = ox0 / scale;
+    let iy0 = oy0 / scale;
+    let src_col = ox0 - ix0 * scale;
+    let src_row_off = oy0 - iy0 * scale;
+    let need_width = src_col + (ox1 - ox0);
+    let need_height = src_row_off + (oy1 - oy0);
+    if tile.width() < need_width || tile.height() < need_height {
+        return Err(GraphError::Internal(format!(
+            "node {name} tile output is {}x{}, smaller than the {}x{} tile it must cover",
+            tile.width(),
+            tile.height(),
+            need_width,
+            need_height
+        )));
+    }
+    let bpp = cached.bytes_per_pixel();
+    for y in oy0..oy1 {
+        let src_row = tile.row(y - oy0 + src_row_off);
+        let dst = &mut cached.row_mut(y)[ox0 as usize * bpp..ox1 as usize * bpp];
+        let start = src_col as usize * bpp;
+        let end = (src_col + (ox1 - ox0)) as usize * bpp;
+        dst.copy_from_slice(&src_row[start..end]);
+    }
+    Ok(())
 }

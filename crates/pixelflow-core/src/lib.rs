@@ -6,6 +6,7 @@ pub mod format;
 pub mod frame;
 pub mod frame_slot;
 pub mod graph;
+pub mod incremental;
 pub mod pipeline;
 
 pub use format::PixelFormat;
@@ -15,4 +16,5 @@ pub use graph::{
     Graph, GraphBuilder, GraphError, Node, NodeInputs, NodeOutputs, ProcessorNode, Source,
     SpatialDependency, TemporalDependency,
 };
+pub use incremental::{DirtySet, TILE_SIZE, TileGrid};
 pub use pipeline::{ProcessError, Processor, StrideSupport};
