@@ -27,7 +27,7 @@
 //! and there is no window list to poll.
 
 use crate::launcher::Launcher;
-use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
+use pixelflow_capture::{CaptureBackend, CaptureConfig, CaptureError, SourceKind};
 use pixelflow_core::{
     AlgorithmConfig, DirtySet, ExecutionBackend, Frame, FrameSlot, Graph, GraphBuilder, GraphError,
     Source, TileGrid, TileRouting,
@@ -76,15 +76,14 @@ fn best_effort<T, E>(step: Result<T, E>) {
 }
 
 /// Open capture for the requested source, falling back to monitor
-/// when window capture fails. Window is the default; monitor is
-/// the fallback when window capture is unavailable, per the
-/// `CaptureConfig` contract. Any window initialize failure triggers
-/// the one monitor attempt: the failure modes that matter here
-/// (picker dismissed, backend cancelled, source unavailable) are
-/// all reported by the backend as an initialize error, and the
-/// fallback cannot tell a transient failure from a permanent one
-/// without retrying the dialog, so it attempts the fallback once
-/// and reports both failures when that also fails. The monitor
+/// when window capture fails because the source is unavailable.
+/// Window is the default; monitor is the fallback when window
+/// capture is unavailable, per the `CaptureConfig` contract. A
+/// cancelled window selection is terminal for the run: the picker
+/// was dismissed or the backend cancelled the request, so falling
+/// back to monitor would capture the whole screen when the
+/// selection was refused, and mask the failure. Any other window
+/// initialize failure triggers the one monitor attempt. The monitor
 /// attempt opens a fresh portal session on the same backend: a
 /// failed initialize leaves the backend uninitialized, so the
 /// second call starts a new session instead of reusing the failed
@@ -93,7 +92,8 @@ fn best_effort<T, E>(step: Result<T, E>) {
 /// # Errors
 ///
 /// Returns the combined failure when the requested source and, for
-/// a window request, the monitor fallback both fail to initialize.
+/// a window request, the monitor fallback both fail to initialize,
+/// and the cancellation itself when window selection was cancelled.
 fn initialize_capture(
     backend: &mut impl CaptureBackend,
     requested: SourceKind,
@@ -103,6 +103,9 @@ fn initialize_capture(
         Err(error) => {
             if requested != SourceKind::Window {
                 return Err(format!("capture failed to start: {error}"));
+            }
+            if matches!(error, CaptureError::SelectionCancelled(_)) {
+                return Err(format!("{error}; no monitor fallback attempted"));
             }
             eprintln!(
                 "pixelflow: window capture failed to start: {error}; attempting monitor capture as fallback"
@@ -701,7 +704,6 @@ fn run_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pixelflow_capture::CaptureError;
     use pixelflow_core::{PixelFormat, Processor};
     use pixelflow_processing::Contour;
     use pixelflow_processing::region_analysis::ContentClass;
@@ -905,8 +907,13 @@ mod tests {
 
     /// A capture backend that succeeds only for the listed sources,
     /// recording every initialize call, for the fallback tests.
+    /// `failures` names the exact error one source fails with, so
+    /// the fallback rule is tested per failure kind, not per
+    /// message: a cancelled selection and an unavailable source
+    /// take different paths through `initialize_capture`.
     struct StubBackend {
         succeeds: Vec<SourceKind>,
+        failures: Vec<(SourceKind, CaptureError)>,
         attempts: Vec<SourceKind>,
     }
 
@@ -914,6 +921,19 @@ mod tests {
         fn new(succeeds: Vec<SourceKind>) -> StubBackend {
             StubBackend {
                 succeeds,
+                failures: Vec::new(),
+                attempts: Vec::new(),
+            }
+        }
+
+        fn failing(
+            source: SourceKind,
+            error: CaptureError,
+            succeeds: Vec<SourceKind>,
+        ) -> StubBackend {
+            StubBackend {
+                succeeds,
+                failures: vec![(source, error)],
                 attempts: Vec::new(),
             }
         }
@@ -922,6 +942,13 @@ mod tests {
     impl CaptureBackend for StubBackend {
         fn initialize(&mut self, config: &CaptureConfig) -> Result<(), CaptureError> {
             self.attempts.push(config.source);
+            if let Some((_, error)) = self
+                .failures
+                .iter()
+                .find(|(source, _)| *source == config.source)
+            {
+                return Err(error.clone());
+            }
             if self.succeeds.contains(&config.source) {
                 Ok(())
             } else {
@@ -1109,6 +1136,58 @@ mod tests {
             backend.attempts,
             vec![SourceKind::Window, SourceKind::Monitor],
             "the fallback attempts monitor on the same backend after window fails"
+        );
+    }
+
+    #[test]
+    fn window_selection_cancelled_is_terminal() {
+        let mut backend = StubBackend::failing(
+            SourceKind::Window,
+            CaptureError::SelectionCancelled(
+                "select sources response: Cancelled; the source picker dialog was dismissed, or the compositor backend cancelled the request"
+                    .to_string(),
+            ),
+            vec![],
+        );
+        let result = initialize_capture(&mut backend, SourceKind::Window);
+        assert!(result.is_err(), "a cancelled selection ends the run");
+        if let Err(error) = result {
+            assert!(
+                error.contains("selection cancelled"),
+                "the error names the cancellation: {error}"
+            );
+            assert!(
+                error.contains("no monitor fallback attempted"),
+                "the error names the missing fallback: {error}"
+            );
+            assert!(
+                !error.contains("monitor fallback also failed"),
+                "no monitor attempt ran: {error}"
+            );
+        }
+        assert_eq!(
+            backend.attempts,
+            vec![SourceKind::Window],
+            "no monitor attempt after a cancelled selection"
+        );
+    }
+
+    #[test]
+    fn window_unavailable_still_falls_back_to_monitor() {
+        let mut backend = StubBackend::failing(
+            SourceKind::Window,
+            CaptureError::SourceUnavailable {
+                requested: SourceKind::Window,
+                available: vec![SourceKind::Monitor],
+            },
+            vec![SourceKind::Monitor],
+        );
+        let result = initialize_capture(&mut backend, SourceKind::Window);
+        assert_eq!(result, Ok(SourceKind::Monitor));
+        assert_eq!(
+            backend.attempts,
+            vec![SourceKind::Window, SourceKind::Monitor],
+            "an unavailable window still falls back to monitor"
         );
     }
 
