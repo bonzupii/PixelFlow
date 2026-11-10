@@ -269,10 +269,9 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
 /// serves, routed to the first stage; `general` routes the
 /// general path to the first stage too, when this graph
 /// serves it. A graph serves exactly the branches its
-/// algorithm is tabled for, so
-/// [`RoutedGraphs::node_for_tile`] resolves a tile through
-/// the table first and asks the graph that owns the tile's
-/// branch. Built fresh in the processing thread, which owns
+/// algorithm is tabled for, so a tile resolves through
+/// the table first and the graph that owns the tile's
+/// branch is asked. Built fresh in the processing thread, which owns
 /// the graph exactly as it owns the capture backend and the
 /// child process.
 ///
@@ -377,31 +376,6 @@ impl<'a> RoutedGraphs<'a> {
             }
         }
         ids
-    }
-
-    /// The graph for `id`, or `None` when the routed set has
-    /// no graph for it.
-    #[must_use]
-    pub fn graph(&self, id: &str) -> Option<&Graph> {
-        self.graphs
-            .iter()
-            .find(|(candidate, _)| *candidate == id)
-            .map(|(_, graph)| graph)
-    }
-
-    /// Which node processes tile (`tx`, `ty`) of `class`
-    /// under the current routing: the node of the graph the
-    /// tile's class resolves to. This is the routed answer;
-    /// asking one graph directly falls back to its general
-    /// node for branches another graph serves, so the
-    /// table resolves first and only the owning graph is
-    /// asked. `None` when no routing is set on that graph
-    /// yet, or the tile is outside the grid.
-    #[must_use]
-    pub fn node_for_tile(&self, tx: u32, ty: u32, class: ContentClass) -> Option<&str> {
-        let id = self.algorithm_for(class);
-        let (_, graph) = self.graphs.iter().find(|(candidate, _)| *candidate == id)?;
-        graph.node_for_tile(tx, ty)
     }
 }
 
@@ -1332,21 +1306,18 @@ mod tests {
         assert_tile_region_eq(&processed, &direct_contour, 0, 0, 2);
         assert_tile_region_eq(&processed, &direct_nearest, 1, 0, 2);
         assert_tile_region_differs(&processed, &direct_contour, 1, 0, 2);
-        // The per-tile node lookup agrees: text resolves to
-        // the contour node, flat to the nearest node.
-        assert_eq!(
-            graphs.node_for_tile(0, 0, ContentClass::Text),
-            Some("contour")
-        );
-        assert_eq!(
-            graphs.node_for_tile(1, 0, ContentClass::Flat),
-            Some("nearest")
-        );
+        // The class-to-algorithm resolution agrees: text
+        // resolves to contour, flat to nearest.
+        assert_eq!(graphs.algorithm_for(ContentClass::Text), "contour");
+        assert_eq!(graphs.algorithm_for(ContentClass::Flat), "nearest");
         // The routing table on the contour graph names the
         // text branch, and the flat tile routes to the flat
         // branch on the nearest graph.
         let table = graphs
-            .graph("contour")
+            .graphs
+            .iter()
+            .find(|(id, _)| *id == "contour")
+            .map(|(_, graph)| graph)
             .ok_or_else(|| "no contour graph".to_string())?
             .routing()
             .ok_or_else(|| "graph has no routing after a routed frame".to_string())?;
@@ -1355,7 +1326,10 @@ mod tests {
         assert_eq!(table.routed_count(), 2);
         // First frame: every tile is dirty.
         let invalidated = graphs
-            .graph("contour")
+            .graphs
+            .iter()
+            .find(|(id, _)| *id == "contour")
+            .map(|(_, graph)| graph)
             .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after a routed frame".to_string())?;
@@ -1450,7 +1424,10 @@ mod tests {
         // the pixel dirty set holds the middle tile, the halo
         // adds both neighbors.
         let invalidated = graphs
-            .graph("contour")
+            .graphs
+            .iter()
+            .find(|(id, _)| *id == "contour")
+            .map(|(_, graph)| graph)
             .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after the second frame".to_string())?;
@@ -1472,7 +1449,10 @@ mod tests {
         assert_tile_region_eq(&processed, &direct_contour, 1, 0, 2);
         assert_tile_region_eq(&processed, &direct_nearest, 2, 0, 2);
         let invalidated = graphs
-            .graph("contour")
+            .graphs
+            .iter()
+            .find(|(id, _)| *id == "contour")
+            .map(|(_, graph)| graph)
             .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after the third frame".to_string())?;
