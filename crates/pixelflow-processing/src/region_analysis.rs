@@ -138,7 +138,7 @@
 use pixelflow_core::{DirtySet, Frame, TileGrid};
 
 /// Feature-set version. The classification rules and the
-/// feature definitions above are version 1. Bump this when
+/// feature definitions above are version 2. Bump this when
 /// either changes, so a saved routing names the detector it
 /// was built against.
 pub const FEATURE_VERSION: u32 = 2;
