@@ -58,6 +58,18 @@ pub struct RunOptions {
     pub windowed: bool,
 }
 
+/// Run a best-effort shutdown step and drop its result: the
+/// caller is already reporting the failure that made the step
+/// necessary, and a kill of a child that already exited, or a
+/// shutdown of a backend that never started, is not a second
+/// failure worth reporting.
+fn best_effort<T, E>(step: Result<T, E>) {
+    match step {
+        Ok(_) => {}
+        Err(_) => {}
+    }
+}
+
 /// Open capture for the requested source, falling back to monitor
 /// when window capture fails. Window is the default; monitor is
 /// the fallback when window capture is unavailable, per the
@@ -186,10 +198,7 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         Err(e) => {
             // The child is already gone or cannot be killed; the capture
             // error below is the one to report.
-            match launcher.kill() {
-                Ok(()) => {}
-                Err(_) => {}
-            }
+            best_effort(launcher.kill());
             return Err(e);
         }
     };
@@ -211,14 +220,8 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     let present = match PresentLoop::new(opts.windowed, slot.clone(), exit.clone()) {
         Ok(present) => present,
         Err(e) => {
-            match backend.shutdown() {
-                Ok(()) => {}
-                Err(_) => {}
-            }
-            match launcher.kill() {
-                Ok(()) => {}
-                Err(_) => {}
-            }
+            best_effort(backend.shutdown());
+            best_effort(launcher.kill());
             return Err(format!("presentation failed: {e}"));
         }
     };
@@ -296,16 +299,11 @@ fn build_algorithm_graph(
         .first()
         .copied()
         .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no input format")))?;
-    let first = descriptor
-        .stages
-        .first()
-        .copied()
-        .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no stages")))?;
-    let last = descriptor
-        .stages
-        .last()
-        .copied()
-        .ok_or_else(|| GraphError::Internal(format!("{algorithm} declares no stages")))?;
+    // The check above proves the stage list is non-empty: an
+    // empty list builds zero nodes and fails there, and a
+    // length mismatch fails too. Indexing is exact here.
+    let first = descriptor.stages[0];
+    let last = descriptor.stages[descriptor.stages.len() - 1];
     let mut builder = GraphBuilder::new();
     // `build` takes the builder by value, so the chained
     // `&mut Self` is moved out with `take`, not discarded:
