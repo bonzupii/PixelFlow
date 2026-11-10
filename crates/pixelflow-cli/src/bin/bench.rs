@@ -25,7 +25,13 @@ use std::hint::black_box;
 use std::process::{Command, ExitStatus};
 use std::time::Instant;
 
-const SIZES: [(u32, u32); 4] = [(256, 224), (854, 480), (1280, 720), (1920, 1080)];
+const SIZES: [(u32, u32); 5] = [
+    (256, 224),
+    (854, 480),
+    (1280, 720),
+    (1920, 1080),
+    (3840, 2160),
+];
 const SCALES: [u32; 2] = [2, 4];
 const TIMED_REPS: usize = 5;
 
@@ -119,20 +125,9 @@ fn peak_rss_kib() -> Result<u64, Box<dyn Error>> {
 
 /// Run one case: one warmup, then `TIMED_REPS` timed runs. Prints
 /// one machine-readable line with the median time, fps, and peak
-/// RSS. A case the memory budget refuses prints a refusal line
-/// instead: the budget is product behavior, and the benchmark
-/// reports it rather than working around it.
+/// RSS. There is no fixed size refusal: `Contour` on its own sets
+/// no budget, so every case runs and reports its own numbers.
 fn run_one(width: u32, height: u32, scale: u32) -> Result<(), Box<dyn Error>> {
-    let out_width = width
-        .checked_mul(scale)
-        .ok_or("benchmark output width overflows")?;
-    let out_height = height
-        .checked_mul(scale)
-        .ok_or("benchmark output height overflows")?;
-    if let Err(e) = Contour::check_memory_budget(out_width, out_height) {
-        println!("case {width}x{height} scale={scale} refused: {e}");
-        return Ok(());
-    }
     let frame = generate_frame(width, height)?;
     let contour = Contour;
     let warmup = contour.process(&frame, scale)?;
@@ -165,7 +160,7 @@ fn run_all() -> Result<(), Box<dyn Error>> {
     };
     println!("contour benchmark, edge follower: {follower}");
     println!(
-        "sizes 256x224, 854x480, 1280x720, 1920x1080; scales 2, 4; 1 warmup + {TIMED_REPS} timed runs per case; median reported"
+        "sizes 256x224, 854x480, 1280x720, 1920x1080, 3840x2160; scales 2, 4; 1 warmup + {TIMED_REPS} timed runs per case; median reported"
     );
     println!("size scale median_ms fps peak_rss_mib");
     let exe = env::current_exe()?;

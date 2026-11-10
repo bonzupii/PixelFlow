@@ -24,9 +24,8 @@
 
 use crate::launcher::Launcher;
 use pixelflow_capture::{CaptureBackend, CaptureConfig, SourceKind};
-use pixelflow_core::{FrameSlot, Processor};
+use pixelflow_core::FrameSlot;
 use pixelflow_present::{PresentLoop, PresentUserEvent};
-use pixelflow_processing::Contour;
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,7 +58,7 @@ pub struct RunOptions {
 /// supported, the portal session cannot open, capture fails, or the
 /// presentation window cannot start.
 pub fn run(opts: RunOptions) -> Result<(), String> {
-    let processor = Contour;
+    let processor = crate::contour_from_env();
     if !processor.supported_scales().contains(&opts.scale) {
         return Err(format!(
             "scale {} is not supported by {}; supported scales: {:?}",
@@ -149,7 +148,7 @@ fn run_processing(
     wake: impl Fn() -> bool,
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let processor = Contour;
+    let processor = crate::contour_from_env();
     let mut result: Result<(), String> = Ok(());
     while !exit.load(Ordering::Relaxed) {
         match backend.capture_frame() {

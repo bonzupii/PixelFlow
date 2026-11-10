@@ -40,6 +40,22 @@ pub trait Processor {
         StrideSupport::Any
     }
 
+    /// Whether this algorithm can run on a cropped input frame
+    /// and produce exactly the corresponding crop of its
+    /// whole-frame output: the output for a pixel depends only
+    /// on the input pixels the spatial dependency already
+    /// covers, never on the frame's size or the pixel's absolute
+    /// position. The default is `false`: the executor runs the
+    /// algorithm whole-frame and reads dirty tiles from that
+    /// output. An algorithm overrides this only when the cropped
+    /// run is exact — nearest-neighbour scaling qualifies; an
+    /// algorithm with edge handling that clamps to the frame
+    /// boundary does not, because a crop would clamp to the
+    /// crop boundary instead.
+    fn tile_safe(&self) -> bool {
+        false
+    }
+
     /// Process one frame. The input frame's format must be RGB8; use
     /// [`Frame::to_rgb8`] first for anything else. The output frame
     /// is RGB8 at `width * scale` by `height * scale`.
@@ -71,22 +87,39 @@ pub enum ProcessError {
     /// The algorithm failed internally; the message says why.
     Internal(String),
     /// The input would need more working memory than the
-    /// documented budget allows. This is a property of the
-    /// requested output size, not an internal failure: the
-    /// caller asked for an output the algorithm refuses to
-    /// build. The budget and the measured per-pixel cost are
-    /// recorded in `docs/performance.md`.
+    /// configured budget allows. This is a property of the
+    /// requested output size and the caller's budget, not an
+    /// internal failure: the caller set a budget and asked for
+    /// an output whose estimated working set exceeds it. The
+    /// budget is explicit (see `Contour::with_memory_budget`);
+    /// there is no fixed product limit. The estimate and its
+    /// model are recorded in `docs/performance.md`.
     MemoryBudgetExceeded {
         /// Name of the algorithm that refused the input.
         algorithm: &'static str,
+        /// Pipeline stage that ran the check (e.g. "budget").
+        stage: &'static str,
         /// Output pixels requested (`width * height` at the
         /// requested scale).
         output_pixels: u64,
         /// Working set the output would need, in bytes,
-        /// estimated from the measured per-pixel cost.
+        /// estimated from the working-set model.
         estimated_bytes: u64,
         /// The budget, in bytes.
         budget_bytes: u64,
+    },
+    /// A size computation overflowed: the requested dimensions
+    /// need more bytes than the arithmetic can express, so no
+    /// allocation is attempted. This is a property of the
+    /// requested size, not an internal failure.
+    SizeOverflow {
+        /// Name of the algorithm that refused the input.
+        algorithm: &'static str,
+        /// Pipeline stage that ran the check (e.g. "budget").
+        stage: &'static str,
+        /// Output pixels requested (`width * height` at the
+        /// requested scale).
+        output_pixels: u64,
     },
 }
 
@@ -102,13 +135,22 @@ impl std::fmt::Display for ProcessError {
             ProcessError::Internal(msg) => write!(f, "processing failed: {msg}"),
             ProcessError::MemoryBudgetExceeded {
                 algorithm,
+                stage,
                 output_pixels,
                 estimated_bytes,
                 budget_bytes,
             } => write!(
                 f,
-                "{algorithm} refuses {output_pixels} output pixels: estimated working set \
+                "{algorithm} ({stage}) refuses {output_pixels} output pixels: estimated working set \
                  {estimated_bytes} bytes exceeds the {budget_bytes} byte budget"
+            ),
+            ProcessError::SizeOverflow {
+                algorithm,
+                stage,
+                output_pixels,
+            } => write!(
+                f,
+                "{algorithm} ({stage}) cannot size {output_pixels} output pixels: the size arithmetic overflows"
             ),
         }
     }

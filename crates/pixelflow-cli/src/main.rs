@@ -66,11 +66,25 @@ enum Command {
 
 fn algorithm(name: &str) -> Result<Box<dyn Processor>, String> {
     match name {
-        "contour" => Ok(Box::new(Contour)),
+        "contour" => Ok(contour_from_env()),
         "nearest" => Ok(Box::new(Nearest)),
         other => Err(format!(
             "unknown algorithm {other:?}; available: contour, nearest"
         )),
+    }
+}
+
+/// Build the Contour processor, honouring `PIXELFLOW_MEMORY_BUDGET`
+/// (bytes, plain integer) when it is set. An unset or invalid value
+/// means no budget: any size the machine can allocate is attempted.
+/// The budget is a caller resource limit, not a product ceiling.
+fn contour_from_env() -> Box<dyn Processor> {
+    match std::env::var("PIXELFLOW_MEMORY_BUDGET") {
+        Ok(text) => match text.trim().parse::<u64>() {
+            Ok(bytes) => Box::new(Contour::with_memory_budget(bytes)),
+            Err(_) => Box::new(Contour),
+        },
+        Err(_) => Box::new(Contour),
     }
 }
 

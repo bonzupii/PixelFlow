@@ -178,18 +178,6 @@ fn shifted_u(src: &UImg, dy: isize, dx: isize) -> UImg {
     out
 }
 
-fn shifted_b(mask: &[bool], w: usize, h: usize, dy: isize, dx: isize) -> Vec<bool> {
-    let mut out = vec![false; w * h];
-    for y in 0..h {
-        let sy = clamp_idx(y, dy, h - 1);
-        for x in 0..w {
-            let sx = clamp_idx(x, dx, w - 1);
-            out[y * w + x] = mask[sy * w + sx];
-        }
-    }
-    out
-}
-
 fn color_ids(src: &UImg) -> Vec<u32> {
     let mut out = vec![0u32; src.w * src.h];
     for (i, px) in src.d.as_chunks::<3>().0.iter().enumerate() {
@@ -447,37 +435,38 @@ fn dither_mask(src: &UImg) -> Vec<bool> {
             }
         }
     }
+    // The shifted reads below are inlined: each reads the key/same
+    // value at the clamped neighbour directly, so no shifted copy
+    // of either plane is allocated. The values read are the same
+    // ones `shifted_i64`/`shifted_b` returned.
     let mut same = vec![false; w * h];
     for (dy, dx) in [(0isize, 2isize), (0, -2), (2, 0), (-2, 0)] {
-        let k2 = shifted_i64(&key, w, h, dy, dx);
-        for i in 0..w * h {
-            if checker[i] && key[i] == k2[i] && k2[i] >= 0 {
-                same[i] = true;
+        for y in 0..h {
+            let sy = clamp_idx(y, dy, h - 1);
+            for x in 0..w {
+                let sx = clamp_idx(x, dx, w - 1);
+                let i = y * w + x;
+                let k2 = key[sy * w + sx];
+                if checker[i] && key[i] == k2 && k2 >= 0 {
+                    same[i] = true;
+                }
             }
         }
     }
     let mut mask = vec![false; w * h];
     for dy in 0..2isize {
         for dx in 0..2isize {
-            let s = shifted_b(&same, w, h, -dy, -dx);
-            for i in 0..w * h {
-                mask[i] |= s[i];
+            for y in 0..h {
+                let sy = clamp_idx(y, -dy, h - 1);
+                for x in 0..w {
+                    let sx = clamp_idx(x, -dx, w - 1);
+                    let i = y * w + x;
+                    mask[i] |= same[sy * w + sx];
+                }
             }
         }
     }
     mask
-}
-
-fn shifted_i64(vals: &[i64], w: usize, h: usize, dy: isize, dx: isize) -> Vec<i64> {
-    let mut out = vec![0i64; w * h];
-    for y in 0..h {
-        let sy = clamp_idx(y, dy, h - 1);
-        for x in 0..w {
-            let sx = clamp_idx(x, dx, w - 1);
-            out[y * w + x] = vals[sy * w + sx];
-        }
-    }
-    out
 }
 
 /// Per-pixel 50% blend of the aligned 2x2 block the pixel sits in.
@@ -531,6 +520,23 @@ const OFFS: [(isize, isize); 9] = [
     (1, 1),
 ];
 
+/// Tap weights per subpixel row and column, computed once:
+/// `taps` is called `scale` times, not once per output pixel.
+/// The values are the same ones the per-subpixel calls
+/// returned: `offset` counts the subpixel offsets in f32,
+/// exactly equal to the usize offsets as f32, so the tap math
+/// needs no cast. Rows and columns share the sequence, so one
+/// call serves both.
+fn tap_weights(scale: usize, scale_f: f32, sig: f32) -> Vec<[f32; 3]> {
+    let mut weights: Vec<[f32; 3]> = Vec::with_capacity(scale);
+    let mut offset = 0.0f32;
+    for _ in 0..scale {
+        weights.push(taps((offset + 0.5) / scale_f - 0.5, sig));
+        offset += 1.0;
+    }
+    weights
+}
+
 /// 08: contrast-adaptive sharp labelset, `algos2.labelset_adaptive`.
 /// Reference names: `w`/`h` are the width/height, `f` is a shifted
 /// colour plane, `l` is the per-tap label weight, `p` is the blended
@@ -561,34 +567,58 @@ fn labelset_adaptive(src: &UImg, scale: usize) -> FImg {
         });
         planes_id.push(color_ids(&shifted_u(src, dy, dx)));
     }
+    // Tap weights per subpixel row and column, computed once.
+    // The row and column sequences are the same.
+    let wy_rows = tap_weights(scale, scale_f, sig);
+    let wx_cols = wy_rows.clone();
     let mut out = FImg::new(width * scale, height * scale);
     let kbase = 1.04 * sig * scale_f;
-    // row_f/col_f count the subpixel offsets in f32, exactly equal to
-    // the usize offsets as f32, so the tap math needs no cast.
-    let mut row_f = 0.0f32;
-    for iy in 0..scale {
-        let wy = taps((row_f + 0.5) / scale_f - 0.5, sig);
-        let mut col_f = 0.0f32;
-        for ix in 0..scale {
-            let wx = taps((col_f + 0.5) / scale_f - 0.5, sig);
-            // tap weight w[k] = wy[dy+1] * wx[dx+1]; OFFS is row-major,
-            // so dy+1 is k/3 and dx+1 is k%3.
-            let mut tw = [0.0f32; 9];
-            for (k, _) in OFFS.iter().enumerate() {
-                tw[k] = wy[k / 3] * wx[k % 3];
+    // The loops run source pixel first, subpixel second: the nine
+    // shifted ids and colours at one source pixel are read once and
+    // reused for all scale * scale subpixels, and the label weights
+    // are one sum per id group instead of a 9x9 comparison.
+    for y in 0..height {
+        for x in 0..width {
+            let mut ids = [0u32; 9];
+            let mut cols = [[0.0f32; 3]; 9];
+            for i in 0..9 {
+                ids[i] = planes_id[i][y * width + x];
+                cols[i] = planes_c[i].get(y, x);
             }
-            for y in 0..height {
-                for x in 0..width {
-                    // L[i] = sum_j tw[j] where ids[j] == ids[i]
+            // Group taps by equal id: `group_of[i]` is the lowest
+            // tap index with the same id as tap i.
+            let mut group_of = [0usize; 9];
+            for i in 0..9 {
+                let mut rep = i;
+                for j in 0..i {
+                    if ids[j] == ids[i] {
+                        rep = j;
+                        break;
+                    }
+                }
+                group_of[i] = rep;
+            }
+            for (iy, &wy) in wy_rows.iter().enumerate() {
+                for (ix, &wx) in wx_cols.iter().enumerate() {
+                    // tap weight w[k] = wy[dy+1] * wx[dx+1]; OFFS is row-major,
+                    // so dy+1 is k/3 and dx+1 is k%3.
+                    let mut tw = [0.0f32; 9];
+                    for (k, _) in OFFS.iter().enumerate() {
+                        tw[k] = wy[k / 3] * wx[k % 3];
+                    }
+                    // L[i] = sum_j tw[j] where ids[j] == ids[i].
+                    // Every tap in a group has the same L, so one
+                    // sum per group replaces the double loop. Each
+                    // group's sum adds its taps in increasing j
+                    // order, the same order the double loop adds
+                    // them, so the sums are bit-identical.
+                    let mut group_sum = [0.0f32; 9];
+                    for j in 0..9 {
+                        group_sum[group_of[j]] += tw[j];
+                    }
                     let mut label_w = [0.0f32; 9];
                     for i in 0..9 {
-                        let mut acc = 0.0f32;
-                        for j in 0..9 {
-                            if planes_id[j][y * width + x] == planes_id[i][y * width + x] {
-                                acc += tw[j];
-                            }
-                        }
-                        label_w[i] = acc;
+                        label_w[i] = group_sum[group_of[i]];
                     }
                     let mut i1 = 0;
                     for i in 1..9 {
@@ -597,24 +627,20 @@ fn labelset_adaptive(src: &UImg, scale: usize) -> FImg {
                         }
                     }
                     let l1 = label_w[i1];
-                    let c1 = planes_c[i1].get(y, x);
-                    let id1 = planes_id[i1][y * width + x];
+                    let c1 = cols[i1];
+                    let id1 = ids[i1];
                     // runner-up: best L among taps whose id != id1
                     let mut i2 = 0;
                     let mut best = f32::NEG_INFINITY;
                     for i in 0..9 {
-                        let lv = if planes_id[i][y * width + x] == id1 {
-                            -1.0
-                        } else {
-                            label_w[i]
-                        };
+                        let lv = if ids[i] == id1 { -1.0 } else { label_w[i] };
                         if lv > best {
                             best = lv;
                             i2 = i;
                         }
                     }
                     let l2 = best.max(0.0);
-                    let c2 = planes_c[i2].get(y, x);
+                    let c2 = cols[i2];
                     let den = ((c2[0] - c1[0]).powi(2)
                         + (c2[1] - c1[1]).powi(2)
                         + (c2[2] - c1[2]).powi(2))
@@ -630,9 +656,7 @@ fn labelset_adaptive(src: &UImg, scale: usize) -> FImg {
                     out.set(y * scale + iy, x * scale + ix, pixel);
                 }
             }
-            col_f += 1.0;
         }
-        row_f += 1.0;
     }
     out
 }
@@ -773,7 +797,9 @@ fn gated_merge(a: &UImg) -> FImg {
 fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
     let near = nearest(a, s);
     let blur = gaussian_blur(&near, 1.0);
-    // std from gaussian-filtered near and near^2, mean over channels
+    // std from gaussian-filtered near and near^2, mean over channels.
+    // The mean is the same blur as `blur` above (same input, same
+    // sigma, pure function), so it is reused, not recomputed.
     let mut near2 = FImg::new(near.w, near.h);
     for i in 0..near.w * near.h {
         for c in 0..3 {
@@ -782,7 +808,6 @@ fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
         }
     }
     let sq = gaussian_blur(&near2, 1.0);
-    let mean = gaussian_blur(&near, 1.0);
     let mut out = FImg::new(near.w, near.h);
     for y in 0..near.h {
         for x in 0..near.w {
@@ -794,7 +819,7 @@ fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
             let mut std = 0.0f32;
             for c in 0..3 {
                 let var = (sq.d[(y * near.w + x) * 3 + c]
-                    - mean.d[(y * near.w + x) * 3 + c].powi(2))
+                    - blur.d[(y * near.w + x) * 3 + c].powi(2))
                 .max(0.0);
                 std += var.sqrt();
             }
@@ -809,24 +834,6 @@ fn grain_layer(a: &UImg, s: usize, strength: f32) -> FImg {
                     strength * g[2] * gate,
                 ],
             );
-        }
-    }
-    out
-}
-
-/// Hard-light blend, `algos2.hardlight`.
-fn hardlight(base: &FImg, top: &FImg) -> FImg {
-    let mut out = FImg::new(base.w, base.h);
-    for i in 0..base.w * base.h {
-        for c in 0..3 {
-            let b = base.d[i * 3 + c] / 255.0;
-            let t = top.d[i * 3 + c] / 255.0;
-            let v = if t <= 0.5 {
-                2.0 * b * t
-            } else {
-                1.0 - 2.0 * (1.0 - b) * (1.0 - t)
-            };
-            out.d[i * 3 + c] = v * 255.0;
         }
     }
     out
@@ -863,18 +870,25 @@ fn combined(a: &UImg, s: usize) -> FImg {
             out.d[i * 3 + c] = clamp_f(out.d[i * 3 + c] + grain.d[i * 3 + c], 0.0, 255.0);
         }
     }
-    // 10 hard-light at 0.5
+    // 10 hard-light at 0.5, fused into the output in place: the
+    // hard-light value per pixel is computed from the Scale2x u8
+    // detail directly, so neither the f32 detail image nor the
+    // hard-light image is materialized. The arithmetic per pixel
+    // is the same as `hardlight` followed by the 0.5 blend, in
+    // the same order: `base` and `top` are the same values, the
+    // hard-light value is the same `lit * 255.0`, and the blend
+    // reads the pre-hard-light output.
     let detail_u = scalenx(a, s);
-    let mut detail = FImg::new(detail_u.w, detail_u.h);
-    for i in 0..detail_u.w * detail_u.h {
-        for c in 0..3 {
-            detail.d[i * 3 + c] = f32::from(detail_u.d[i * 3 + c]);
-        }
-    }
-    let hl = hardlight(&out, &detail);
     for i in 0..out.w * out.h {
         for c in 0..3 {
-            out.d[i * 3 + c] = clamp_f(0.5 * out.d[i * 3 + c] + 0.5 * hl.d[i * 3 + c], 0.0, 255.0);
+            let base = out.d[i * 3 + c] / 255.0;
+            let top = f32::from(detail_u.d[i * 3 + c]) / 255.0;
+            let lit = if top <= 0.5 {
+                2.0 * base * top
+            } else {
+                1.0 - 2.0 * (1.0 - base) * (1.0 - top)
+            };
+            out.d[i * 3 + c] = clamp_f(0.5 * out.d[i * 3 + c] + 0.5 * (lit * 255.0), 0.0, 255.0);
         }
     }
     out
@@ -1399,13 +1413,12 @@ struct RunSlice {
 }
 
 /// Shared state for re-rendering runs: the source, the output being
-/// written, and the per-pixel best-distance/touched maps. Grouped so
-/// the per-run helpers stay under the argument limit.
+/// written, and the per-pixel best-distance map. Grouped so the
+/// per-run helpers stay under the argument limit.
 struct FollowCtx<'a> {
     src: &'a UImg,
     out: &'a mut FImg,
     best: &'a mut [f32],
-    touched: &'a mut [bool],
 }
 
 /// Sample `run` at the output columns inside source column `u`.
@@ -1508,7 +1521,6 @@ fn apply_horizontal(
                 ],
             );
             ctx.best[oy * ctx.out.w + ox] = (ys[yi] - fitted[j]).abs() as f32;
-            ctx.touched[oy * ctx.out.w + ox] = true;
         }
     }
 }
@@ -1576,7 +1588,6 @@ fn apply_vertical(
                 ],
             );
             ctx.best[oy * ctx.out.w + ox] = (xs[xi] - fitted[j]).abs() as f32;
-            ctx.touched[oy * ctx.out.w + ox] = true;
         }
     }
 }
@@ -1632,9 +1643,11 @@ fn apply_run(
 
 /// `edge_follow2`, `algos5.edge_follow2`: re-render coherent runs at
 /// their fitted subpixel positions by shifting the source profile.
-fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
+fn edge_follow2(base: FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
     let (height, width) = (src.h, src.w);
-    let mut out = base.clone();
+    // The base is taken by value, not cloned: the caller hands over
+    // the combined output, so the follower works on it directly.
+    let mut out = base;
     let (h_runs, v_runs) = find_runs2(src);
     let horizontal_runs = h_runs.len();
     let vertical_runs = v_runs.len();
@@ -1646,12 +1659,10 @@ fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
     // this: mario's long hill-boundary runs compete at a near-tie,
     // and the f32 comparison is the reference port's behaviour.
     let mut best = vec![f32::INFINITY; width * scale * height * scale];
-    let mut touched = vec![false; width * scale * height * scale];
     let mut ctx = FollowCtx {
         src,
         out: &mut out,
         best: &mut best,
-        touched: &mut touched,
     };
     for run in &h_runs {
         apply_run(run, 0, scale, height * scale, width * scale, &mut ctx);
@@ -1659,8 +1670,12 @@ fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
     for run in &v_runs {
         apply_run(run, 1, scale, height * scale, width * scale, &mut ctx);
     }
-    let (touched_count, total_count) = touched.iter().fold((0u32, 0u32), |(count, total), b| {
-        (count + u32::from(*b), total + 1)
+    // A pixel is touched exactly when its best distance is finite:
+    // the follower only writes finite distances (at most the 2.5
+    // band), and untouched pixels keep INFINITY. No separate
+    // touched map is allocated.
+    let (touched_count, total_count) = best.iter().fold((0u32, 0u32), |(count, total), d| {
+        (count + u32::from(*d != f32::INFINITY), total + 1)
     });
     let touched_frac = f64::from(touched_count) / f64::from(total_count);
     (
@@ -1677,10 +1692,11 @@ fn edge_follow2(base: &FImg, src: &UImg, scale: usize) -> (FImg, Stats) {
 
 /// 20: 12 combined, then `edge_follow2`. No dither source anywhere.
 /// `CONTOUR_NO_FOLLOW`=1 skips the follower (12 only), for testing.
-fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
-    let base = combined(a, s);
+fn clean_base_edge(a: &UImg, s: usize) -> Result<(FImg, Stats), ProcessError> {
+    let mut base = FImg::new(a.w * s, a.h * s);
+    combined_into(a, s, &mut base)?;
     if std::env::var("CONTOUR_NO_FOLLOW").is_ok() {
-        return (
+        return Ok((
             base,
             Stats {
                 h_runs: 0,
@@ -1689,55 +1705,396 @@ fn clean_base_edge(a: &UImg, s: usize) -> (FImg, Stats) {
                 v_len: 0,
                 touched_frac: 0.0,
             },
-        );
+        ));
     }
-    edge_follow2(&base, a, s)
+    Ok(edge_follow2(base, a, s))
+}
+
+// ---------------------------------------------------------------- strips
+/// Halo rows on each side of a strip: true input rows the strip's
+/// interior output rows may read. The 3x3 neighbourhoods reach 1
+/// input row and the dither shifts reach 3 input rows; the grain
+/// blur radius is 4 output rows, at most 2 input rows. Four rows
+/// cover both with 1 row of margin.
+const STRIP_HALO_ROWS: usize = 4;
+
+/// Target working set for one strip, in bytes. The strip height
+/// is chosen from this and the output width, so a strip's
+/// intermediate images stay near this size whatever the frame
+/// height is.
+const STRIP_TARGET_BYTES: u64 = 256 << 20;
+
+/// Conservative bound on a strip's peak working set per output
+/// pixel, in bytes: above the measured 84 bytes per output pixel
+/// of the pre-strip pipeline, so the strip height derived from it
+/// stays on the safe side.
+const STRIP_PEAK_BYTES_PER_OUTPUT_PIXEL: u64 = 96;
+
+/// Largest single allocation, in bytes: `isize::MAX`, the `Vec`
+/// length limit. Computed without a cast, so the clippy cast
+/// lints stay silent.
+fn max_alloc_bytes() -> u64 {
+    u64::try_from(isize::MAX).unwrap_or(u64::MAX)
+}
+
+/// Input rows per strip, chosen so one strip's working set stays
+/// near [`STRIP_TARGET_BYTES`]. A strip covers its rows plus the
+/// halo on each side and produces that many rows times the scale
+/// in output rows; its peak is bounded by
+/// [`STRIP_PEAK_BYTES_PER_OUTPUT_PIXEL`] per output pixel.
+/// Clamped to a sane range so very wide frames still get several
+/// strips and very narrow frames do not get one-row strips.
+fn strip_input_rows(out_width: u32, scale: u32) -> usize {
+    let denom = u64::from(out_width)
+        .saturating_mul(u64::from(scale))
+        .saturating_mul(STRIP_PEAK_BYTES_PER_OUTPUT_PIXEL);
+    if denom == 0 {
+        return 64;
+    }
+    let rows = usize::try_from(STRIP_TARGET_BYTES / denom).unwrap_or(usize::MAX);
+    rows.saturating_sub(2 * STRIP_HALO_ROWS).clamp(8, 64)
+}
+
+/// Worker threads for the strip driver: the machine's parallelism,
+/// capped, with `CONTOUR_THREADS` as an override for testing.
+/// Invalid values fall back to the default. The output is identical
+/// at any thread count, since strips write disjoint rows.
+fn thread_count() -> usize {
+    if let Ok(text) = std::env::var("CONTOUR_THREADS")
+        && let Ok(n) = text.parse::<usize>()
+        && n > 0
+    {
+        return n.min(16);
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16)
+}
+
+/// Fill the output rows of one input-row band. `out_rows` is the
+/// band's slice of the output image (row-major f32 RGB, covering
+/// output rows `band_y0 * scale .. band_y1 * scale`); the band's
+/// strips are processed in order, each writing its interior rows
+/// into the slice. The input is shared read-only.
+fn process_band(
+    a: &UImg,
+    s: usize,
+    band_y0: usize,
+    band_y1: usize,
+    strip_rows: usize,
+    out_rows: &mut [f32],
+) {
+    let out_w = a.w * s;
+    let row_len = out_w * 3;
+    let mut y = band_y0;
+    while y < band_y1 {
+        let y1 = (y + strip_rows).min(band_y1);
+        // Strip input rows, with a halo of true rows on each side
+        // (clamped at the image edge, where the strip boundary is
+        // the image boundary and the edge behaviour is the true
+        // one). The halo is wide enough that every interior output
+        // row's reads stay inside the strip. The strip start is
+        // rounded down to an even absolute row: `dither_blend`
+        // aligns its 2x2 blocks to the frame origin, so a strip
+        // starting on an odd row would blend different pixel
+        // pairs than the whole-frame run and change the output
+        // where the dither mask fires. Rounding down adds at
+        // most one halo row.
+        let strip_y0 = y.saturating_sub(STRIP_HALO_ROWS) & !1;
+        let strip_y1 = (y1 + STRIP_HALO_ROWS).min(a.h);
+        let mut strip = UImg {
+            w: a.w,
+            h: strip_y1 - strip_y0,
+            d: Vec::with_capacity((strip_y1 - strip_y0) * a.w * 3),
+        };
+        for row in strip_y0..strip_y1 {
+            let start = row * a.w * 3;
+            strip.d.extend_from_slice(&a.d[start..start + a.w * 3]);
+        }
+        let strip_out = combined(&strip, s);
+        // Interior output rows of this strip, copied into the
+        // band slice at the band-relative offset.
+        let out_y0 = (y - band_y0) * s;
+        let first = (y - strip_y0) * s;
+        let rows = (y1 - y) * s;
+        let src_start = first * row_len;
+        let dst_start = out_y0 * row_len;
+        out_rows[dst_start..dst_start + rows * row_len]
+            .copy_from_slice(&strip_out.d[src_start..src_start + rows * row_len]);
+        y = y1;
+    }
+}
+
+/// Fill `out` with `combined` run in full-width row bands
+/// (strips), in parallel across bands. Each strip is the input
+/// rows of one band slice plus a halo of true rows on each side;
+/// `combined` runs on the strip exactly as it runs on a whole
+/// image, and only the strip's interior rows are copied into
+/// `out`. The halo is wide enough that no interior output pixel
+/// reads a strip-edge value: the 3x3 neighbourhoods reach 1 input
+/// row and the dither shifts reach 3 input rows, the grain blur
+/// radius is 4 output rows (at most 2 input rows), and the edge follower is not
+/// stripped at all — it runs on the whole output, since its runs
+/// span whole scanlines. Strip starts are even absolute rows:
+/// `dither_blend` aligns its 2x2 blocks to the frame origin, so
+/// an odd strip start would blend different pixel pairs than
+/// the whole-frame run. A strip's working set is bounded by its
+/// rows, so peak memory grows with the image width, not its
+/// height. Strips write disjoint output rows, so the result is
+/// identical at any thread count.
+///
+/// # Errors
+///
+/// Returns [`ProcessError::SizeOverflow`] when the strip image
+/// length overflows.
+fn combined_into(a: &UImg, s: usize, out: &mut FImg) -> Result<(), ProcessError> {
+    if a.w == 0 || a.h == 0 || out.w == 0 || out.h == 0 {
+        return Ok(());
+    }
+    let strip_rows = strip_input_rows(
+        u32::try_from(out.w).unwrap_or(u32::MAX),
+        u32::try_from(s).unwrap_or(u32::MAX),
+    );
+    // The strip image is at most (strip_rows + 2 * halo) rows by
+    // the input width; check that length before any thread
+    // allocates one, so an absurd width fails with a typed error
+    // instead of wrapping.
+    let strip_in_rows = strip_rows + 2 * STRIP_HALO_ROWS;
+    let strip_pixels = u64::try_from(strip_in_rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(a.w).unwrap_or(u64::MAX));
+    if strip_pixels
+        .checked_mul(3)
+        .is_none_or(|bytes| bytes > max_alloc_bytes())
+    {
+        return Err(ProcessError::SizeOverflow {
+            algorithm: "contour",
+            stage: "strip",
+            output_pixels: strip_pixels,
+        });
+    }
+    let in_h = a.h;
+    let n_threads = thread_count().min(in_h).max(1);
+    // Split the input rows into contiguous bands, one per thread.
+    let mut bands: Vec<(usize, usize)> = Vec::with_capacity(n_threads);
+    let base = in_h / n_threads;
+    let rem = in_h % n_threads;
+    let mut start = 0usize;
+    for i in 0..n_threads {
+        let len = base + usize::from(i < rem);
+        bands.push((start, start + len));
+        start += len;
+    }
+    // Split the output buffer into the bands' row slices. Each
+    // band covers output rows [y0 * s, y1 * s), so its slice is
+    // (y1 - y0) * s rows of out.w * 3 f32 values.
+    let row_len = out.w * 3;
+    let mut slices: Vec<&mut [f32]> = Vec::with_capacity(n_threads);
+    let mut rest: &mut [f32] = &mut out.d;
+    for (y0, y1) in &bands {
+        let len = (y1 - y0) * s * row_len;
+        let (head, tail) = rest.split_at_mut(len);
+        slices.push(head);
+        rest = tail;
+    }
+    std::thread::scope(|scope| {
+        for ((y0, y1), slice) in bands.into_iter().zip(slices) {
+            scope.spawn(move || {
+                process_band(a, s, y0, y1, strip_rows, slice);
+            });
+        }
+    });
+    Ok(())
 }
 
 // ---------------------------------------------------------------- adapter
 /// Algorithm 20 as a [`Processor`]: 12 (combined) + `edge_follow2`, no
 /// dither source anywhere. Input must be RGB8; output is RGB8 at
 /// `width * scale` by `height * scale`.
+///
+/// The memory budget is configurable, not fixed: [`Contour`] on its
+/// own sets no budget, and [`Contour::with_memory_budget`] returns a
+/// [`LimitedContour`] that enforces one. The default is unlimited
+/// on purpose — no product limit is derived from the machine the
+/// benchmarks happened to run on. A configured budget is checked
+/// before any allocation for the frame, against the working-set
+/// model in [`Contour::check_memory_budget`]. The memory the
+/// algorithm needs is bounded by construction (strips), not by a
+/// pixel ceiling: see [`combined_into`].
 pub struct Contour;
 
-/// Working-set estimate per output pixel, in bytes. Measured by
-/// `pixelflow-bench` (see `docs/performance.md`): the peak-RSS
-/// slope across sizes is about 84 bytes per output pixel, and the
-/// largest observed ratio is 114 at the smallest size, where the
-/// process baseline dominates. 128 is the conservative bound used
-/// for the refusal check below.
-const BYTES_PER_OUTPUT_PIXEL: u64 = 128;
-
-/// Maximum working set Contour may allocate for one frame: 2 GiB,
-/// a quarter of an 8 GiB machine. At 128 bytes per output pixel
-/// this allows up to 16,777,216 output pixels, which covers every
-/// benchmarked case except 1920x1080 at 4x (33,177,600 output
-/// pixels, 2,759 MiB measured peak).
-const MEMORY_BUDGET_BYTES: u64 = 2 << 30;
+/// A [`Contour`] with an explicit memory budget, in bytes. Built by
+/// [`Contour::with_memory_budget`]; the budget is checked before
+/// any allocation for the frame, and a frame whose estimated
+/// working set exceeds it fails with
+/// [`ProcessError::MemoryBudgetExceeded`].
+pub struct LimitedContour {
+    budget_bytes: u64,
+}
 
 impl Contour {
-    /// Refuse an output size whose estimated working set exceeds
-    /// the memory budget, before allocating anything for it. The
-    /// estimate is `output pixels * BYTES_PER_OUTPUT_PIXEL`;
-    /// anything over the budget is refused rather than started.
+    /// A [`Contour`] that refuses a frame whose estimated working
+    /// set exceeds `budget_bytes`. See
+    /// [`Contour::check_memory_budget`] for the estimate.
+    #[must_use]
+    pub fn with_memory_budget(budget_bytes: u64) -> LimitedContour {
+        LimitedContour { budget_bytes }
+    }
+
+    /// Working-set estimate for one frame, and the refusal check
+    /// against an explicit budget. The estimate is the output
+    /// image (12 bytes per output pixel as f32) plus the follower's
+    /// best-distance map (4), the final u8 conversion (3), the
+    /// input (3 bytes per input pixel), and the strips' working
+    /// sets: one strip per worker thread
+    /// ([`STRIP_TARGET_BYTES`], bounded by
+    /// [`STRIP_PEAK_BYTES_PER_OUTPUT_PIXEL`] per output pixel),
+    /// since the bands run in parallel and each holds one strip
+    /// at a time. `threads` is the worker count the caller runs
+    /// with; at most one strip per band is live, so the count is
+    /// capped at the input height. All in checked u64 arithmetic.
+    /// `None` means no budget: any size the machine can allocate
+    /// is attempted. The check also verifies the output and input
+    /// images fit in single allocations, so an absurd size fails
+    /// here instead of wrapping in `FImg`.
     ///
     /// # Errors
     ///
-    /// Returns [`ProcessError::MemoryBudgetExceeded`] when the
-    /// estimate exceeds [`MEMORY_BUDGET_BYTES`].
-    pub fn check_memory_budget(output_width: u32, output_height: u32) -> Result<(), ProcessError> {
+    /// Returns [`ProcessError::MemoryBudgetExceeded`] when a budget
+    /// is set and the estimate exceeds it, and
+    /// [`ProcessError::SizeOverflow`] when the size arithmetic
+    /// itself overflows or an image cannot be allocated.
+    pub fn check_memory_budget(
+        budget: Option<u64>,
+        scale: u32,
+        output_width: u32,
+        output_height: u32,
+        threads: usize,
+    ) -> Result<(), ProcessError> {
+        let overflow = || ProcessError::SizeOverflow {
+            algorithm: "contour",
+            stage: "budget",
+            output_pixels: u64::from(output_width) * u64::from(output_height),
+        };
+        if scale == 0 {
+            return Err(ProcessError::Internal(
+                "contour budget check: scale 0 has no input size".into(),
+            ));
+        }
         let output_pixels = u64::from(output_width) * u64::from(output_height);
-        let estimated = output_pixels.saturating_mul(BYTES_PER_OUTPUT_PIXEL);
-        if estimated > MEMORY_BUDGET_BYTES {
+        // The output and input images are the largest single
+        // allocations (12 bytes per pixel as f32); each must fit
+        // in a `Vec`, whose length is bounded by `isize::MAX`.
+        let out_image_bytes = output_pixels.checked_mul(12).ok_or_else(overflow)?;
+        if out_image_bytes > max_alloc_bytes() {
+            return Err(overflow());
+        }
+        let scale_sq = u64::from(scale) * u64::from(scale);
+        let input_pixels = output_pixels / scale_sq;
+        let in_image_bytes = input_pixels.checked_mul(12).ok_or_else(overflow)?;
+        if in_image_bytes > max_alloc_bytes() {
+            return Err(overflow());
+        }
+        let strip_rows = strip_input_rows(output_width, scale);
+        let strip_term = u64::from(output_width)
+            .checked_mul(u64::try_from(strip_rows + 2 * STRIP_HALO_ROWS).unwrap_or(u64::MAX))
+            .and_then(|n| n.checked_mul(u64::from(scale)))
+            .and_then(|n| n.checked_mul(STRIP_PEAK_BYTES_PER_OUTPUT_PIXEL))
+            .ok_or_else(overflow)?;
+        // One strip is live per worker thread: the bands run in
+        // parallel, each holding one strip at a time. Counting
+        // one strip would understate the peak by the other
+        // threads' strips (measured: 1080p at 4x peaks at 884
+        // MiB on 4 threads against 582 MiB on 1). The live
+        // count is capped at the input height, since there is
+        // one band per input row at most.
+        let input_height = output_height / scale;
+        let live_strips = u64::try_from(threads)
+            .unwrap_or(u64::MAX)
+            .max(1)
+            .min(u64::from(input_height));
+        let strip_term = strip_term.checked_mul(live_strips).ok_or_else(overflow)?;
+        let input_term = input_pixels.checked_mul(3).ok_or_else(overflow)?;
+        let estimated = output_pixels
+            .checked_mul(19)
+            .and_then(|n| n.checked_add(input_term))
+            .and_then(|n| n.checked_add(strip_term))
+            .ok_or_else(overflow)?;
+        if let Some(budget) = budget
+            && estimated > budget
+        {
             return Err(ProcessError::MemoryBudgetExceeded {
                 algorithm: "contour",
+                stage: "budget",
                 output_pixels,
                 estimated_bytes: estimated,
-                budget_bytes: MEMORY_BUDGET_BYTES,
+                budget_bytes: budget,
             });
         }
         Ok(())
     }
+}
+
+/// Shared implementation for [`Contour`] and [`LimitedContour`]:
+/// process one frame with an optional memory budget (`None` means
+/// no budget).
+fn process_with_budget(
+    frame: &Frame,
+    scale: u32,
+    budget: Option<u64>,
+) -> Result<Frame, ProcessError> {
+    if scale != 2 && scale != 4 {
+        return Err(ProcessError::UnsupportedScale {
+            algorithm: "contour",
+            scale,
+        });
+    }
+    if frame.format() != PixelFormat::Rgb8 {
+        return Err(ProcessError::UnsupportedFormat {
+            algorithm: "contour",
+            format: frame.format().to_string(),
+        });
+    }
+    // Pack a strided input; a tight frame is borrowed, so the
+    // common path pays no copy.
+    let frame = frame.packed();
+    let frame = &*frame;
+    // Output dimensions are frame dims times the scale; fail
+    // early with an honest error instead of truncating.
+    let out_width = frame
+        .width()
+        .checked_mul(scale)
+        .ok_or_else(|| ProcessError::Internal("contour output width exceeds u32 range".into()))?;
+    let out_height = frame
+        .height()
+        .checked_mul(scale)
+        .ok_or_else(|| ProcessError::Internal("contour output height exceeds u32 range".into()))?;
+    // Size and budget check, before allocating anything for the
+    // frame. With no budget this still verifies the size
+    // arithmetic and that the images fit in single allocations.
+    Contour::check_memory_budget(budget, scale, out_width, out_height, thread_count())?;
+    let src = UImg {
+        w: frame.width() as usize,
+        h: frame.height() as usize,
+        d: frame.data().to_vec(),
+    };
+    let (out, stats) = clean_base_edge(&src, scale as usize)?;
+    if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
+        eprintln!(
+            "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
+            stats.h_runs,
+            stats.h_len,
+            stats.v_runs,
+            stats.v_len,
+            stats.touched_frac * 100.0
+        );
+    }
+    Frame::new(out_width, out_height, PixelFormat::Rgb8, to_u8_img(&out))
+        .map_err(|e| ProcessError::Internal(e.to_string()))
+        .map(|out| {
+            out.with_timestamp(frame.timestamp())
+                .with_sequence(frame.sequence())
+        })
 }
 
 impl Processor for Contour {
@@ -1758,55 +2115,25 @@ impl Processor for Contour {
     }
 
     fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
-        if !self.supported_scales().contains(&scale) {
-            return Err(ProcessError::UnsupportedScale {
-                algorithm: "contour",
-                scale,
-            });
-        }
-        if frame.format() != PixelFormat::Rgb8 {
-            return Err(ProcessError::UnsupportedFormat {
-                algorithm: "contour",
-                format: frame.format().to_string(),
-            });
-        }
-        // Pack a strided input; a tight frame is borrowed, so the
-        // common path pays no copy.
-        let frame = frame.packed();
-        let frame = &*frame;
-        // Output dimensions are frame dims times the scale; fail
-        // early with an honest error instead of truncating.
-        let out_width = frame.width().checked_mul(scale).ok_or_else(|| {
-            ProcessError::Internal("contour output width exceeds u32 range".into())
-        })?;
-        let out_height = frame.height().checked_mul(scale).ok_or_else(|| {
-            ProcessError::Internal("contour output height exceeds u32 range".into())
-        })?;
-        // Refuse an output that would exceed the memory budget
-        // before allocating anything for it.
-        Contour::check_memory_budget(out_width, out_height)?;
-        let src = UImg {
-            w: frame.width() as usize,
-            h: frame.height() as usize,
-            d: frame.data().to_vec(),
-        };
-        let (out, stats) = clean_base_edge(&src, scale as usize);
-        if std::env::var("CONTOUR_DEBUG_RUNS").is_ok() {
-            eprintln!(
-                "edge runs: {} horizontal ({} px), {} vertical ({} px), touched {:.1}% of output",
-                stats.h_runs,
-                stats.h_len,
-                stats.v_runs,
-                stats.v_len,
-                stats.touched_frac * 100.0
-            );
-        }
-        Frame::new(out_width, out_height, PixelFormat::Rgb8, to_u8_img(&out))
-            .map_err(|e| ProcessError::Internal(e.to_string()))
-            .map(|out| {
-                out.with_timestamp(frame.timestamp())
-                    .with_sequence(frame.sequence())
-            })
+        process_with_budget(frame, scale, None)
+    }
+}
+
+impl Processor for LimitedContour {
+    fn name(&self) -> &'static str {
+        "contour"
+    }
+
+    fn supported_scales(&self) -> &[u32] {
+        &[2, 4]
+    }
+
+    fn stride_support(&self) -> StrideSupport {
+        StrideSupport::TightOnly
+    }
+
+    fn process(&self, frame: &Frame, scale: u32) -> Result<Frame, ProcessError> {
+        process_with_budget(frame, scale, Some(self.budget_bytes))
     }
 }
 
