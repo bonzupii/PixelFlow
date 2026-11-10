@@ -14,6 +14,10 @@ or a Wayland capture demo. The project includes:
 
 - Live desktop/application capture.
 - A configurable image-processing graph.
+- Independently configurable processing operations, composable
+  into sequential pipelines, branches, layers, and saved
+  profiles, not only selection of complete algorithms (see §3
+  and §12 item 10).
 - Multiple independent restoration, reconstruction, scaling, and filtering
   algorithms.
 - CPU and GPU execution. GPU-first is foundational; CPU stays available
@@ -36,13 +40,13 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `38cdf67`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `e8b475f`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
-| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
+| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
 | `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); wired into the live path and the algorithm registry at `aea977c` (`nearest-gpu` registered; live `run` resolves `nearest` to the GPU node when an adapter is present); device run unverified — no adapter on this VM |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
@@ -70,6 +74,44 @@ Processing contracts as they exist at HEAD:
   silent CPU fallback); its parity test runs through the real graph
   executor and skips honestly with no adapter. It was wired into
   the live path and the algorithm registry at `aea977c`.
+
+### Operation contracts (requirement; not implemented)
+
+The composition system works at the individual processing-operation
+level, not only at the whole-algorithm level. An operation is an
+independently configurable pure function: it produces its output
+from its declared inputs and configuration, without secretly
+modifying unrelated processing state or depending on hidden
+execution-order side effects. The logical processing graph has
+deterministic, inspectable data dependencies.
+
+Operations declare their inputs, outputs, types, configuration,
+and compatibility requirements, so the composition system can
+connect them correctly. Operations need not all consume and
+produce images. The typed intermediate values the system must
+support include edge and confidence fields, orientation and
+directional fields, region labels and masks, palette data, and
+geometric feature data. A reconstruction operation may consume an
+image and geometric feature data; a blending operation may consume
+multiple image layers and a weight or mask field; a compositing
+operation may consume multiple processed images. The system must
+not impose an image-in/image-out interface on an operation whose
+useful output is a feature map, mask, geometry, classification,
+or other intermediate data.
+
+Status: not implemented. The current `Node` interface is
+frame-in/frame-out only: `NodeInputs`/`NodeOutputs` carry `Frame`
+values, ports are named strings checked on pixel format, and
+`run` takes `&mut self`, so purity is not guaranteed by the
+interface. Extending ports to typed intermediate values and
+requiring operations to be pure functions of declared inputs is
+part of this work (see §12 item 10). Physical execution may fuse
+operations, reuse resources, or optimize execution as long as the
+logical graph, configuration, and observable processing semantics
+remain intact. GPU execution must support the same compositional
+model as CPU execution: the GPU path must not become a collection
+of indivisible, hard-coded shaders while the CPU path is
+composable.
 
 ## 3. Algorithm integration framework
 
@@ -118,9 +160,60 @@ with real GPU processing; offline and live paths use the framework; tests
 verify contracts and failure cases; the integration example works;
 documentation matches the implementation.
 
-## 4. Contour — unfinished
+### Operation-level composition
 
-Contour is the flagship algorithm and it is unfinished. It still misses
+The framework must support composition at the individual
+operation level, not merely selection and chaining of complete,
+monolithic algorithms. The composition system must not be
+restricted to choosing one complete scaler from a registry and
+applying it as an indivisible black box.
+
+Complete algorithms remain available as selectable algorithms
+and presets. Their internal processing logic must not be treated
+as inherently indivisible: where practical, their constituent
+operations are exposed through the reusable composition system.
+This applies to Contour, PixelFlow, AaCut, LabelSet, and the
+other processing algorithms. The objective is both convenient,
+ready-to-use complete algorithms AND freedom to inspect,
+configure, replace, rearrange, and combine their constituent
+operations. A user must be able to use one algorithm's edge
+detection with another algorithm's reconstruction, another
+interpolation method, and a different blending operation, and
+must not be restricted to combinations anticipated by the
+original algorithm author.
+
+The operation library is extensible, not a closed catalog. It
+includes, at minimum:
+
+- Analysis and feature extraction: edge detection; edge
+  classification and direction estimation; orientation and
+  structure-tensor analysis; corner and junction detection;
+  geometric and silhouette analysis; subpixel edge positioning;
+  color-region and palette analysis; dither detection and
+  classification; texture and grain detection; gradient and
+  tonal analysis; mask generation and region classification.
+- Reconstruction and transformation: geometric edge
+  reconstruction; subpixel contour reconstruction; corner
+  reconstruction; curve and silhouette reconstruction;
+  interpolation and resampling; palette-aware reconstruction;
+  dither preservation, enhancement, and reconstruction; texture
+  and fine-detail reconstruction; noise and grain processing;
+  contrast and tonal processing; anti-aliasing and transition
+  reconstruction; spatial and scale-dependent transformations.
+- Blending and compositing: alpha blending; weighted blending;
+  additive blending; multiplicative blending; masked blending;
+  layer compositing; edge-aware blending; palette-aware
+  blending; multi-source compositing; cross-fading between
+  processing results.
+
+Status: not implemented as an operation library. The graph
+machinery for chains and branches exists; no production blend,
+layer, or composite node exists in any library crate, and no
+operation is independently selectable today. See §12 item 10.
+
+## 4. Contour, unfinished
+
+PixelFlow is the flagship algorithm. Contour is unfinished. It still misses
 the desired result. Do not declare it complete and do not treat recent
 improvements as proof it is finished.
 
@@ -129,7 +222,12 @@ enhancement is one feature, independently controllable, not the
 algorithm's purpose, and never a justification for sacrificing the rest.
 Do not simplify Contour into nearest-neighbour plus arcs, strokes, or a
 dither filter. Do not remove existing reconstruction stages. Nearest
-neighbour remains a separate baseline algorithm.
+neighbour remains a separate baseline algorithm. Contour's
+constituent operations are exposed through the composition system
+where practical (see §3): its edge detection, orientation
+analysis, reconstruction stages, and blending are independently
+configurable operations, not hard-coded internals. Exposing
+operations does not remove or simplify any reconstruction stage.
 
 Contour must address all of these, as complementary responsibilities, not
 mutually exclusive modes:
@@ -494,6 +592,34 @@ Contour product algorithm; do not confuse the two.
   the live paths; no routing behavior changed.
   This replaces the stale driver-run release 217 at `d2e057e`, which
   predates the region-routing commits and must not be carried forward.
+  Baseline at `d2547b1` (PixelFlow soft-branch correction,
+  2026-11-10): 254 passed / 0 failed, commit-recorded in the
+  commit message; not independently verified by a driver run.
+  Baseline at `134a052` (bicubic port, 2026-11-10): 267 passed /
+  0 failed; tally read from the owner's suite log
+  `goals/pixelflow/hidden_files/cg-bicubic-suite-release.log`
+  (sum 267 passed, 0 failed across the result blocks, no
+  failures); oracle bit-identical per
+  `cg-bicubic-oracle.log`.
+  Baseline at `e8b475f` verified by this driver run (release,
+  2026-11-10, `cargo build --release` exit 0, `cargo fmt --check`
+  exit 0, `ci/clippy-gate.sh` exit 0 with 30 known contour.rs
+  diagnostics and 0 elsewhere, `cargo test --release --workspace`
+  under `dbus-run-session` with `PIXELFLOW_FIXTURES_DIR` set,
+  exit 0): 280 passed / 0 failed, 24 result blocks, no failures.
+  Fixture-exercised evidence: regression ran 6 tests, including
+  `lanczos3_fixture_baseline_at_4x`,
+  `bicubic_fixture_baseline_at_4x`,
+  `pixelflow_fixture_baseline_at_4x`, and
+  `contour_matches_python_reference_at_4x`, all ok; no skip
+  lines. Raw logs:
+  `goals/pixelflow/hidden_files/driver-lanczos3-verify-fmt.log`,
+  `driver-lanczos3-verify-build-release.log`,
+  `driver-lanczos3-verify-clippy.log`,
+  `driver-lanczos3-verify-suite-release.log`. The run verified the
+  lanczos3 worktree sources at `e8b475f`, which the owner had
+  already fast-forwarded onto main and pushed before the run
+  finished; the tree content is identical.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -524,6 +650,16 @@ Contour product algorithm; do not confuse the two.
   and mixed-content images. Previous known-good outputs are kept; references
   are never silently replaced to make regressions pass.
 
+Composition tests: swapping one operation for another (edge
+detector, reconstruction, blend) changes only the intended
+output; a typed-port mismatch (an edge field connected where an
+image is expected) fails at graph build, before execution; a
+saved pipeline definition round-trips (save, load, identical
+output); a preset customized at the operation level still runs
+through the normal graph executor with the same dirty-set and
+caching behavior; a GPU composition and the same CPU composition
+produce matching output.
+
 ## 9. Active workstreams and ownership
 
 Coordinator: the current coordinator session (replacing `338e91a0`).
@@ -538,6 +674,7 @@ integrates worktree work onto `main`.
 | GPU live-path wiring | GPU wiring worker, worktree `~/workspace/pixelflow-gpu-wire`, branch `gpu/live-path` | Register `nearest-gpu` in the CLI registry; live `run` path resolves `nearest` to the GPU node with an adapter, reports the effective backend, errors loudly for explicit GPU requests with no adapter | Integrated and pushed at `aea977c`; full suite 213 passed / 0 failed; device run and live-path parity still unverified (no adapter on this VM) |
 | Frame delivery | frame-delivery worker, worktree `~/workspace/pixelflow-framepath`, branch `fix/frame-delivery` | Trace the frame path (PipeWire buffers, processing, presentation) to where frames stop on the owner's machine; smallest fix; reproduction test | Integrated and pushed at `d2e057e`; full suite 217 passed / 0 failed; verdict: no transport defect, stall is Contour cost (151.9 s debug / 9.1 s release per 1920x1080 @4x frame); missing presentation window still unexplained in-process, needs the owner's-machine control run |
 | Region routing | region-routing worker, worktree `~/workspace/pixelflow-region-routing`, branch `framework/region-routing` | Meaningful per-class routing with genuinely different paths (not all-to-Contour); routing table + resolver; masks/overrides precedence; hysteresis/halo | Integrated and pushed at `afa6f46`; full suite 226 passed / 0 failed; live acceptance and any GPU-device run still unverified |
+| Operation-level composition | (unassigned) | Operation library, typed ports, blend/layer/composite nodes, pipeline definitions and profiles, GUI exposure; see §3 and §12 item 10 | Not started; queued behind scaler ports (§12 item 9) |
 | Docs cleanup | docs worker, worktree `~/workspace/pixelflow-docs`, branch `docs/readme-cleanup` | README rewritten as a verified product interface; per-document disposition (retained/corrected, none removed); `run.rs` simplification (shutdown discards collapsed, unreachable stage branches removed) | Integrated and pushed at `9f9fb0e`; full suite 217 passed / 0 failed; `docs/engineering-mandate.md` untouched |
 | Wayland verification | verification worker, main tree read-only | Verify commit `4b5cbb4` claim-by-claim, run `cargo test -p pixelflow-wayland` | Done 2026-11-10: all 7 claims verified in code; `cargo test -p pixelflow-wayland` exit 0 (25 unit + 1 mock); mock genuinely exercised under `dbus-run-session`; 5 gaps recorded in §7 |
 | Wayland follow-up | follow-up worker, worktree `~/workspace/pixelflow-wayland-fixes`, branch `wayland/closed-detection-fixes` | Fix verification gaps 1, 2, 4, 5; assess gap 3 (serial vs hyphen key); tolerant close-after-failure, cancelled-selection diagnostic, gone-session mock scenario; mock clippy cleanup | Integrated and pushed at `ffff504`; full suite 194 passed / 0 failed; wayland clippy clean |
@@ -628,6 +765,23 @@ a documented blocker.
   call arguments, scenario helpers; the Session version property
   nobody reads is deleted). Wayland clippy clean; full suite 194
   passed / 0 failed at `ffff504`.
+- `1f4ddc1`, `d2547b1`, PixelFlow: port the reference
+  `fr_contour_guard` as the flagship algorithm (id `pixelflow`,
+  scales 2/4); `d2547b1` replaces the soft branch with the
+  reference `contour_impl`, bit-identical to the reference on all
+  5 oracle scenes at 2x and 4x (max abs diff 0), flat [128,64,32]
+  shift 0, release suite 254 passed / 0 failed, commit-recorded.
+  Owner-authored, on main.
+- `134a052`, Bicubic: port the reference kernel as a separable
+  resampler (Catmull-Rom, 14-bit fixed-point weights), id
+  `bicubic`, scales 2/4, bit-identical oracle, flat shift 0,
+  release suite 267 passed / 0 failed, tally read from the
+  owner's suite log. Owner-authored, on main.
+- `e8b475f`, Lanczos3: port the reference kernel as a separable
+  resampler (windowed sinc, radius 3), id `lanczos3`, scales 2/4,
+  bit-identical oracle, flat shift 0, release suite 280 passed /
+  0 failed. Owner-authored, on main; the driver run verified the
+  gate independently (see §8).
 
 ## 12. Remaining work and acceptance criteria
 
@@ -639,8 +793,12 @@ In execution order (§11 of the owner directive):
    at `aea977c` (213), at `d2e057e` (217), at `afa6f46` (226, debug),
    at `27e6113` (226, release, fixtures exercised — baseline void,
    tree did not build; see §8), at `0ba9d38` (226, release, fixtures
-   exercised, gate verified independently).
-2. Wayland verification report — done 2026-11-10 (all claims verified,
+   exercised, gate verified independently), at `d2547b1` (254,
+   release, commit-recorded), at `134a052` (267, release, tally
+   from the owner's suite log), at `e8b475f` (280, release,
+   fixtures exercised, gate verified independently by the driver
+   run).
+2. Wayland verification report, done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
    Backend-general fixes — integrated at `d3c4b41`. Live acceptance
@@ -716,23 +874,91 @@ In execution order (§11 of the owner directive):
    algorithms only: it does not remove the planner's internal
    sharp-bilinear fractional close step, which is pipeline
    infrastructure. Each port is verified with the full gate before
-   any push, and everything is re-measured fresh per algo — no
-   findings carry over from the old Contour.
-10. Mix-and-match layers (owner direction, 2026-11-10; queued
-    behind the scaler ports). Processing steps are sequential pure
-    functions — the output of one is the input of the next — and
-    they must be configurable as mix-and-matchable layers: each
-    step (edge detection, blending, and the rest) is a layer the
-    user can configure, swap, and compose. PixelFlow in the
-    reference is already four separate pure functions run
-    sequentially (AaCut crisp reconstruction, Contour soft
-    reconstruction, guard-weight dither field, blend); Contour's
-    blending is inlined inside its implementation, not a separate
-    function — factoring it out is part of this work if Contour's
-    steps are to be mixable. The graph executor runs nodes
-    sequentially in topological order, but the Node trait takes
-    `&mut self` and permits stateful history, so purity is not
-    guaranteed by the interface — the layer design must use pure
-    frame-in/frame-out functions. No configuration format is
-    invented here: build the layer mechanism, and the
+   any push, and everything is re-measured fresh per algo, no
+   findings carry over from the old Contour. Status 2026-11-10:
+   PixelFlow ported at `1f4ddc1`, soft branch corrected at
+   `d2547b1` (bit-identical to the reference on all 5 oracle scenes
+   at 2x and 4x, release suite 254 passed / 0 failed,
+   commit-recorded); bicubic ported at `134a052` (bit-identical
+   oracle, release suite 267 passed / 0 failed, tally read from
+   the owner's suite log `cg-bicubic-suite-release.log`);
+   lanczos3 ported at `e8b475f` (bit-identical oracle, release
+   suite 280 passed / 0 failed). Nearest and bilinear are the
+   repo's existing implementations, not reference ports. Next in
+   order: scale2x; the owner is porting in sequence in `port/*`
+   worktrees (`port/scale2x` exists), so the driver spawns no port
+   worker. The "queued behind the CI fix" line is superseded: the
+   ports landed on main with no separate CI-fix commit.
+10. Operation-level composition (owner direction, 2026-11-10;
+    queued behind the scaler ports). This restores and extends
+    the composability requirement: composition at the individual
+    processing-operation level, not merely selection and chaining
+    of complete, monolithic algorithms. The requirement is
+    integrated in §1 (scope), §2 (operation contracts), §3
+    (operation-level composition and the operation library), §4
+    (Contour's constituent operations), §8 (composition tests),
+    §9 (workstream), and the architecture spec (§3.1 typed
+    ports, §5 recombination, §9 routing vs composition, §11
+    combined system, §12 step 5, §13, §14).
+    Processing steps are sequential pure functions, the output
+    of one is the input of the next, and they must be
+    configurable as mix-and-matchable layers: each step (edge
+    detection, blending, and the rest) is a layer the user can
+    configure, swap, and compose. The composition system must
+    support sequential pipelines; branching (an input or
+    intermediate result feeding multiple independent branches);
+    recombination (branch outputs blended, composited, or
+    otherwise combined); layering (independently processed image
+    layers combined into a final output); additive processing
+    (effects and transformations contributing to a shared result
+    without one monolithic algorithm owning the pipeline); masks
+    and conditional application (operations affecting selected
+    regions, features, or layers); region-dependent composition
+    (different regions following different pipelines and
+    subsequently recombining); parameterization (every
+    configurable operation exposing its parameters
+    independently, without source modification or a fixed
+    collection of hard-coded combinations); and reusable pipeline
+    definitions and profiles (saved, loaded, modified, shared).
+    Operations are selectable, reorderable where their
+    input/output requirements permit, parameterized, combined,
+    replaced, and reused. The graphical interface must
+    eventually expose all of it: select, add, remove, and
+    configure operations; arrange sequential operations; create
+    branches; add and configure layers; select blending and
+    compositing operations; connect intermediate outputs and
+    inputs; apply masks and region-specific processing; save,
+    reload, and modify compositions; start from a complete
+    algorithm preset and customize its components. Sequencing:
+    mandate §4 states a graphical node editor is not required,
+    and that the graph is an execution architecture first with a
+    user interface considered independently later. GUI exposure
+    of composition is that later step, a Stage VII capability.
+    Region routing does not satisfy operation-level mix-and-match; a
+    test-only blend node does not satisfy production layering;
+    complete algorithm presets do not satisfy independent
+    configurability. These are separate capabilities with
+    separate status.
+    Status, honestly: the graph machinery for linear chains,
+    branches, and multi-input nodes exists, with topological
+    execution and incremental execution with per-node tile
+    caching. Not implemented: typed intermediate ports (the
+    `Node` interface is frame-in/frame-out only); a production
+    blend, layer, or composite node (the only blend node in the
+    repo is `BlendNode` in `pixelflow-core` tests); the
+    operation library; pipeline definitions and profiles
+    (Stage VII); any graphical interface (the CLI is the only
+    interface). PixelFlow in the reference is already four
+    separate pure functions run sequentially (AaCut crisp
+    reconstruction, Contour soft reconstruction, guard-weight
+    dither field, blend); Contour's blending is inlined inside
+    its implementation, not a separate function, factoring it
+    out is part of this work if Contour's steps are to be
+    mixable. The graph executor runs nodes sequentially in
+    topological order, but the Node trait takes `&mut self` and
+    permits stateful history, so purity is not guaranteed by the
+    interface, the layer design must use pure frame-in/frame-out
+    functions, and GPU execution must support the same
+    compositional model as CPU execution. No configuration
+    format is invented here: build the layer mechanism, and the
     configuration surface follows the owner's call.

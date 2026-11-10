@@ -25,7 +25,12 @@ algorithm) and composites the branch outputs tile by tile.
 What is not implemented: capture damage input (no backend
 supplies damage; the dirty set is computed by comparing
 frames). The `FrameData` enum and buffer pooling are still
-open. Section 12 records the status of each implementation
+open. Operation-level composition is specified in §12 step 5
+and requirements §3: the graph machinery for chains and
+branches exists, but typed intermediate ports, production
+blend/layer/composite nodes, an operation library, pipeline
+profiles, and a graphical interface do not exist yet.
+Section 12 records the status of each implementation
 step.
 
 ## 1. Purpose and scope
@@ -122,6 +127,32 @@ Rules:
   schema, so the graph executor and the configuration system both
   read it from one place.
 
+### 3.1 Typed operation ports
+
+A node declares its input and output value types, not only
+pixel formats. An operation may consume and produce images, or
+it may consume and produce intermediate values: edge and
+confidence fields, orientation and directional fields, region
+labels and masks, palette data, geometric feature data. A
+reconstruction operation may consume an image and geometric
+feature data; a blending operation may consume multiple image
+layers and a weight or mask field; a compositing operation may
+consume multiple processed images. The executor validates typed
+connections at graph build: connecting an edge field where an
+image is expected fails before execution, never silently at run
+time. An operation's declaration states its inputs, outputs,
+types, configuration, and compatibility requirements.
+
+Status: not implemented. The current `Node` interface is
+frame-in/frame-out only: ports carry `Frame` values and are
+checked on pixel format. Typed intermediate ports are part of
+the operation-level composition work (§12 step 5). The
+dependency declarations in this section apply unchanged to
+operations producing intermediate values: an edge detector's
+output field depends on its input image with the same spatial
+radius its operator reads, and its tile cache works the same
+way.
+
 ## 4. Tiles and dirty regions
 
 - The frame is divided into tiles of 16×16 source pixels by
@@ -157,6 +188,15 @@ topological order, node by node:
   the dirty sets on its inputs. A branch that keeps the original
   frame while another branch reconstructs is the reason the
   propagation is per-edge, not per-graph.
+- Recombination: a join node that blends, composites, or
+  otherwise combines branch outputs propagates the union of its
+  inputs' dirty sets, and its own spatial dependency is the
+  union of the radii its inputs contribute. An additive
+  operation contributing to a shared result invalidates exactly
+  the tiles its inputs invalidate; a blend whose weight field
+  changed invalidates the tiles the weight field covers. A join
+  node's cached output tile is reusable only when every input
+  it depends on is unchanged for that tile.
 - Output tiles outside the propagated dirty set are not recomputed
   at that node. They are read from that node's tile cache.
 
@@ -305,6 +345,20 @@ does not silently change meaning when the detector improves.
   needed to avoid seams there; the halo still applies to
   invalidation for the incremental executor.
 
+Region routing is composition of whole algorithms, not
+operation-level mix-and-match. A tile's branch runs one
+algorithm; the routing table does not decompose that
+algorithm into operations. Operation-level composition is a
+separate capability (§12 step 5): a branch may itself be a
+pipeline of independently configurable operations, different
+regions may follow different pipelines and subsequently
+recombine, and a user may take one algorithm's edge detection
+with another algorithm's reconstruction and a different
+blending operation. Region routing does not satisfy
+operation-level mix-and-match, and operation-level
+mix-and-match does not replace region routing. The two are
+tracked separately in implementation status.
+
 ## 10. Temporal stability
 
 - A tile's class must not flicker between frames because a few
@@ -343,6 +397,17 @@ The two systems share the dirty set:
 The processing budget goes where the image changed and where the
 most appropriate processing is needed. That is the whole point.
 
+Operation-level composition runs on the same machinery. A
+branch in the combined system may be a pipeline of
+independently configurable operations rather than one
+algorithm, and different regions may follow different
+pipelines and subsequently recombine through a blend or
+composite join node. The dirty set, the dependency radii, the
+tile cache, and the stability rules apply to operations the
+same way they apply to whole algorithms: an operation's output
+tile is recomputed only when its inputs for that tile changed,
+and a cached intermediate tile is reused otherwise.
+
 ## 12. Implementation order
 
 1. **Incremental execution.** Dirty-region detection, dependency
@@ -376,6 +441,24 @@ most appropriate processing is needed. That is the whole point.
    hysteresis and reclassification gating live in the analyzer,
    and the flicker count is `RegionMap::class_changes_since`;
    no per-frame flicker reporting exists in the live path.
+5. **Operation-level composition.** Independently configurable
+   processing operations, typed intermediate results,
+   branching, recombination, layering, additive processing,
+   masks, region-dependent composition, parameterization, and
+   reusable pipeline definitions and profiles, with the
+   graphical interface exposing the compositional capabilities.
+   NOT LANDED. What exists: the graph machinery for linear
+   chains, branches, and multi-input nodes; topological
+   execution; incremental execution with per-node tile caching.
+   What does not exist: typed intermediate ports (the `Node`
+   interface is frame-in/frame-out only); a production blend,
+   layer, or composite node (the only blend node in the repo is
+   `BlendNode` in `pixelflow-core` tests); an operation library;
+   pipeline definitions or profiles (Stage VII); any graphical
+   interface (the CLI is the only interface). Complete
+   algorithms remain available as presets, and their
+   constituent operations are exposed through the composition
+   system where practical. See requirements §3.
 
 The dependency declaration (Section 3) is not step 1 — it is a
 prerequisite to all of it, and it goes into the node interface
@@ -415,6 +498,16 @@ graph.
   larger source), with mostly-static content and with
   full-screen motion, so the benefit and the cost are both
   measured.
+- **Composition.** A graph that swaps one operation for
+  another (edge detector, reconstruction, blend) and changes
+  only the intended output. A typed-port mismatch (an edge
+  field connected where an image is expected) fails at graph
+  build, before execution. A saved pipeline definition
+  round-trips: save, load, identical output. A preset
+  customized at the operation level still runs through the
+  normal graph executor with the same dirty-set and caching
+  behavior. A GPU composition and the same CPU composition
+  produce matching output.
 
 ## 14. Risks and open questions
 
@@ -440,3 +533,15 @@ graph.
   frame) makes incremental execution useless for that backend.
   The executor must detect that case and fall back to whole
   frames without failing.
+- **Composition correctness.** A wrongly typed connection must
+  fail at build, not produce a silently wrong image at run
+  time. A blend or composite join must not hide a seam or a
+  stale cached tile behind its inputs. The number of possible
+  operation combinations grows fast; profiles must stay
+  versioned and validated so a saved composition does not
+  silently change meaning when an operation improves.
+- **GPU/CPU parity of compositions.** A composition that is
+  configurable on the CPU path must be configurable the same
+  way on the GPU path. A GPU implementation that fuses
+  operations must preserve the logical graph, the
+  configuration, and the observable processing semantics.
