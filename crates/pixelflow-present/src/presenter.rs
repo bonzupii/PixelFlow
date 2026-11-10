@@ -631,6 +631,7 @@ impl PresentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixelflow_core::{Frame, PixelFormat};
 
     #[test]
     fn adapter_request_with_no_backends_is_a_typed_adapter_error() {
@@ -651,6 +652,25 @@ mod tests {
     // threads. The path is exercised only by the real CLI on a
     // machine with no display server, where `PresentLoop::new`
     // returns `PresentError::Window` before the worker starts.
+
+    #[test]
+    fn take_latest_receives_a_published_frame() -> Result<(), pixelflow_core::FrameError> {
+        let slot = Arc::new(FrameSlot::new());
+        let exit = Arc::new(AtomicBool::new(false));
+        let mut presenter = Presenter::new(true, slot.clone(), exit);
+        let frame = Frame::new(2, 1, PixelFormat::Rgb8, vec![9, 8, 7, 6, 5, 4])?;
+        slot.publish(frame);
+        assert!(presenter.take_latest(), "the published frame is taken");
+        assert!(!presenter.take_latest(), "the slot is empty after taking");
+        match presenter.latest.as_ref() {
+            Some((width, height, rgba)) => {
+                assert_eq!((*width, *height), (2, 1));
+                assert_eq!(rgba, &vec![9, 8, 7, 255, 6, 5, 4, 255]);
+            }
+            None => panic!("take_latest stored no frame"),
+        }
+        Ok(())
+    }
 
     #[test]
     fn init_error_is_preserved_until_run_takes_it() {
