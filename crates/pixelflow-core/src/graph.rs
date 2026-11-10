@@ -925,10 +925,11 @@ fn topological_order(
 /// [`GraphBuilder::route_branch`], and
 /// [`Graph::node_for_tile`] is the decision point that reads
 /// this table. The table is metadata only: it names where
-/// each tile goes, and the executor runs the node it names.
-/// With one node in the graph every branch resolves to it,
-/// so the table changes no pixels until per-branch
-/// processors exist.
+/// each tile goes. One graph executes one algorithm, so a
+/// routed run builds one graph per algorithm the routing
+/// table names and composites the branch outputs tile by
+/// tile; within one graph, every branch resolves to a node
+/// of that graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileRouting {
     /// The tile grid these assignments index into.

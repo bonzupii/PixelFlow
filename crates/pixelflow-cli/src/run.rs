@@ -3,10 +3,12 @@
 //! in a fullscreen window.
 //!
 //! The work splits across two threads. The processing thread owns the
-//! capture backend, the child process, and the processing graph: it
+//! capture backend, the child process, and the processing graphs: it
 //! pulls frames, region-analyzes each one restricted to the tiles whose pixels changed, hands the
-//! routes to the graph, runs each through the graph's algorithm node,
-//! and publishes the newest to a replaceable frame slot. A
+//! routes to the graphs, runs each frame through only the graphs its
+//! tiles need — one graph per algorithm the routing table names —
+//! composites the branch outputs tile by tile, and publishes the
+//! newest to a replaceable frame slot. A
 //! newer frame replaces one still waiting in the slot, so the
 //! presentation window always draws the freshest frame and latency
 //! never accumulates. The processing thread wakes the presentation
@@ -32,7 +34,10 @@ use pixelflow_core::{
 };
 use pixelflow_gpu::{GpuCapability, GpuContext, backend_for, gpu_capability};
 use pixelflow_present::{PresentLoop, PresentUserEvent};
-use pixelflow_processing::region_analysis::{RegionAnalyzer, RegionMap, Route, RoutingProfile};
+use pixelflow_processing::region_analysis::{
+    ContentClass, RegionAnalyzer, RegionMap, Route, RoutingProfile,
+    resolve_algorithm as resolve_class_algorithm,
+};
 use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -254,17 +259,22 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     }
 }
 
-/// Build the live processing graph: the registry algorithm's
+/// Build one algorithm's graph: the registry algorithm's
 /// nodes fed by the graph input, exposing the last stage's
-/// output. The nodes come from the registry, so the live path
-/// runs whichever algorithm the user selected — Contour's node
+/// output. The nodes come from the registry, so the graph
+/// runs whichever algorithm `algorithm` names — Contour's node
 /// declares the Global spatial dependency, so the graph runs
 /// it whole-frame; there is no tile-level incremental claim
-/// for it. The text and sprite branches and the general path
-/// all route to the first stage: no per-branch processors exist
-/// yet, so routing changes no pixels. Built fresh in the
-/// processing thread, which owns the graph exactly as it owns
-/// the capture backend and the child process.
+/// for it. `branches` are the branch names this graph
+/// serves, routed to the first stage; `general` routes the
+/// general path to the first stage too, when this graph
+/// serves it. A graph serves exactly the branches its
+/// algorithm is tabled for, so
+/// [`RoutedGraphs::node_for_tile`] resolves a tile through
+/// the table first and asks the graph that owns the tile's
+/// branch. Built fresh in the processing thread, which owns
+/// the graph exactly as it owns the capture backend and the
+/// child process.
 ///
 /// # Errors
 ///
@@ -275,6 +285,8 @@ fn build_algorithm_graph(
     algorithm: &str,
     config: &AlgorithmConfig,
     scale: u32,
+    branches: &[&'static str],
+    general: bool,
 ) -> Result<Graph, GraphError> {
     // The full registry, including the GPU factory: a
     // "nearest-gpu" graph builds its node on the GPU context
@@ -317,12 +329,170 @@ fn build_algorithm_graph(
         let (from, to) = (pair[0], pair[1]);
         current = current.connect(Source::node(from, "out"), to, "in");
     }
-    current = current
-        .route_branch("text", first)
-        .route_branch("sprite", first)
-        .route_general(first)
-        .add_output("out", last, "out");
+    for branch in branches {
+        current = current.route_branch(branch, first);
+    }
+    if general {
+        current = current.route_general(first);
+    }
+    current = current.add_output("out", last, "out");
     std::mem::take(current).build()
+}
+
+/// One graph per algorithm in the routed set, built once
+/// for the run: the general-path algorithm plus every
+/// algorithm the routing table names. A frame runs only
+/// through the graphs its tiles need; each graph runs
+/// whole-frame and the outputs are composited tile by
+/// tile, so a tile is processed by the algorithm its class
+/// resolves to. The graphs are built from the registry, so
+/// no algorithm is named in a match arm here.
+struct RoutedGraphs<'a> {
+    /// Algorithm id and its graph, in first-use class order.
+    graphs: Vec<(&'a str, Graph)>,
+    /// The general-path algorithm id.
+    general: &'a str,
+    /// Scale factor the graphs were built at.
+    scale: u32,
+}
+
+impl<'a> RoutedGraphs<'a> {
+    /// The algorithm id that processes a tile of `class`
+    /// under this run's general path.
+    #[must_use]
+    pub fn algorithm_for(&self, class: ContentClass) -> &'a str {
+        resolve_class_algorithm(class, self.general)
+    }
+
+    /// The algorithm ids the frame's tiles need, in
+    /// first-use tile order: one entry per distinct
+    /// resolved id over the map's tiles.
+    #[must_use]
+    pub fn needed_ids(&self, map: &RegionMap) -> Vec<&'a str> {
+        let mut ids: Vec<&'a str> = Vec::new();
+        for tile in map.tiles() {
+            let id = self.algorithm_for(tile.class);
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    /// The graph for `id`, or `None` when the routed set has
+    /// no graph for it.
+    #[must_use]
+    pub fn graph(&self, id: &str) -> Option<&Graph> {
+        self.graphs
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, graph)| graph)
+    }
+
+    /// Which node processes tile (`tx`, `ty`) of `class`
+    /// under the current routing: the node of the graph the
+    /// tile's class resolves to. This is the routed answer;
+    /// asking one graph directly falls back to its general
+    /// node for branches another graph serves, so the
+    /// table resolves first and only the owning graph is
+    /// asked. `None` when no routing is set on that graph
+    /// yet, or the tile is outside the grid.
+    #[must_use]
+    pub fn node_for_tile(&self, tx: u32, ty: u32, class: ContentClass) -> Option<&str> {
+        let id = self.algorithm_for(class);
+        let (_, graph) = self.graphs.iter().find(|(candidate, _)| *candidate == id)?;
+        graph.node_for_tile(tx, ty)
+    }
+}
+
+/// Build the routed graphs for a run: one graph per
+/// algorithm [`RoutingProfile::routed_algorithms`] names
+/// for `general`, each serving its branches and the general
+/// path when it is the general algorithm. Each algorithm
+/// gets its own configuration from the environment, so a
+/// memory budget reaches Contour and no other algorithm.
+///
+/// # Errors
+///
+/// Returns a message when any algorithm in the routed set
+/// is unknown, unsupported at the scale, or fails to wire.
+fn build_routed_graphs<'a>(
+    general: &'a str,
+    scale: u32,
+    profile: &RoutingProfile,
+) -> Result<RoutedGraphs<'a>, String> {
+    let registry = crate::registry();
+    let mut graphs: Vec<(&'a str, Graph)> = Vec::new();
+    for entry in profile.routed_algorithms(general) {
+        let config = crate::algorithm_config(&registry, entry.id);
+        let graph = build_algorithm_graph(entry.id, &config, scale, &entry.branches, entry.general)
+            .map_err(|error| error.to_string())?;
+        graphs.push((entry.id, graph));
+    }
+    Ok(RoutedGraphs {
+        graphs,
+        general,
+        scale,
+    })
+}
+
+/// Composite the branch outputs into one frame: each
+/// output tile comes from the graph of the algorithm its
+/// class resolves to, starting from the general graph's
+/// output and overwriting the tiles other algorithms own.
+/// Tile-aligned, no blending: a tile is produced entirely
+/// by one branch, per section 9 of the specification. Every
+/// branch output is a whole-frame run, so each tile is
+/// computed with its full frame context and the branch halo
+/// is not needed to avoid seams here. Where Contour is the
+/// route, the tile is copied unchanged from the direct
+/// Contour output, so Contour output is byte-identical to
+/// the direct run.
+///
+/// # Errors
+///
+/// Returns [`GraphError::Internal`] when a tile resolves to
+/// an algorithm with no output, which means a programming
+/// error in the caller: every needed algorithm was run.
+fn composite_routed_outputs(
+    base: Frame,
+    base_id: &str,
+    outputs: &[(&str, Frame)],
+    map: &RegionMap,
+    general: &str,
+    scale: u32,
+) -> Result<Frame, GraphError> {
+    let mut out = base;
+    let grid = map.grid();
+    for ty in 0..grid.rows() {
+        for tx in 0..grid.cols() {
+            let class = map
+                .tile(tx, ty)
+                .map_or(ContentClass::Unknown, |tile| tile.class);
+            let id = resolve_class_algorithm(class, general);
+            if id == base_id {
+                continue;
+            }
+            let (_, source) = outputs
+                .iter()
+                .find(|(candidate, _)| *candidate == id)
+                .ok_or_else(|| {
+                    GraphError::Internal(format!("routed run produced no output for {id}"))
+                })?;
+            let (x0, y0, x1, y1) = grid.tile_rect(tx, ty);
+            let (ox0, oy0, ox1) = (
+                x0 as usize * scale as usize,
+                y0 as usize * scale as usize,
+                x1 as usize * scale as usize,
+            );
+            for oy in oy0..(y1 as usize * scale as usize) {
+                let row = source.row(oy as u32);
+                let dst = out.row_mut(oy as u32);
+                dst[ox0 * 3..ox1 * 3].copy_from_slice(&row[ox0 * 3..ox1 * 3]);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Per-frame region state for the live path: the analyzer, the
@@ -343,8 +513,8 @@ struct FrameRouting {
 }
 
 impl FrameRouting {
-    /// Analyze `frame` into a region map and hand its routes
-    /// and halo invalidation to `graph`, then retain the frame
+    /// Analyze `frame` into a region map and build its tile
+    /// routing and halo invalidation, then retain the frame
     /// and map for the next frame.
     ///
     /// Analysis is dirty-restricted: only tiles whose pixels
@@ -356,10 +526,10 @@ impl FrameRouting {
     /// changed class into a routed branch, so neighbors a
     /// branch reads across are re-processed with the tile.
     /// The frame is cloned once to retain it for the next
-    /// frame's diff: the graph still receives the original by
-    /// value, and the clone is the retention cost of
-    /// dirty-restricted analysis.
-    fn route_frame(&mut self, graph: &mut Graph, frame: &Frame) {
+    /// frame's diff, and the map is cloned once for the same
+    /// reason; the caller keeps the returned map for the
+    /// frame it is about to run.
+    fn analyze(&mut self, frame: &Frame) -> (RegionMap, TileRouting, DirtySet) {
         let grid = TileGrid::from_dims(frame.width(), frame.height());
         let dirty = match &self.previous_frame {
             Some(previous) => DirtySet::diff(previous, frame),
@@ -387,44 +557,93 @@ impl FrameRouting {
                 index += 1;
             }
         }
-        graph.set_routing(routing, invalidated);
-        self.previous_map = Some(map);
+        self.previous_map = Some(map.clone());
         self.previous_frame = Some(frame.clone());
+        (map, routing, invalidated)
     }
 }
 
-/// Run one captured frame through `graph` and return the
-/// processed frame. Routing runs first: `routing` analyzes
-/// the frame dirty-restricted and hands its routes and halo
-/// invalidation to the graph, so the graph knows the routing
-/// of the frame it is about to run. Ownership of the frame
-/// then moves into [`Graph::run`], which takes it by value,
-/// drops it once the node has consumed it, and returns the
-/// output frame by value. The routing keeps one retained copy
-/// of the frame for the next frame's diff; that clone is the
-/// retention cost of dirty-restricted analysis. The
-/// incremental executor is deliberately not used here: with a
-/// single Global node it would diff the whole frame, retain
-/// the previous frame and a cached output, and clone the
-/// output, for output identical to this whole-frame run.
+/// Run one captured frame through the routed graphs and
+/// return the composited frame. Routing runs first: the
+/// frame is analyzed dirty-restricted and the routes are
+/// handed to every graph, so each graph's routing table
+/// names the branches it serves. Then only the graphs the
+/// frame's tiles need run: the first takes the frame by value
+/// and each later one takes a clone, and the outputs are
+/// composited tile by tile by
+/// [`composite_routed_outputs`]. A frame with no tile of a
+/// class never runs that class's algorithm: an all-flat
+/// frame never runs Contour. The incremental executor is
+/// deliberately not used here: each branch graph runs
+/// whole-frame, so a branch output is computed with its
+/// full frame context.
 ///
 /// # Errors
 ///
-/// Returns [`GraphError`] when the frame is not RGB8 or the
-/// algorithm node fails.
-fn process_frame(
-    graph: &mut Graph,
+/// Returns [`GraphError`] when the frame is not RGB8, a
+/// branch graph fails, or a tile resolves to an algorithm
+/// with no output.
+fn process_frame_routed(
+    graphs: &mut RoutedGraphs<'_>,
     frame: Frame,
     routing: &mut FrameRouting,
 ) -> Result<Frame, GraphError> {
-    routing.route_frame(graph, &frame);
-    let mut outputs = graph.run(vec![("in", frame)])?;
-    match outputs.pop() {
-        Some((_, frame)) => Ok(frame),
-        None => Err(GraphError::Internal(
-            "algorithm graph produced no output".to_string(),
-        )),
+    let (map, tile_routing, invalidated) = routing.analyze(&frame);
+    for (_, graph) in &mut graphs.graphs {
+        graph.set_routing(tile_routing.clone(), invalidated.clone());
     }
+    let needed = graphs.needed_ids(&map);
+    let mut outputs: Vec<(&str, Frame)> = Vec::with_capacity(needed.len());
+    let mut input = Some(frame);
+    for (index, id) in needed.iter().enumerate() {
+        // The last graph takes the frame by value; every
+        // earlier graph takes a clone, so a frame runs
+        // through N graphs with N - 1 clones.
+        let frame_in = if index + 1 == needed.len() {
+            input.take().ok_or_else(|| {
+                GraphError::Internal("routed run lost its input frame".to_string())
+            })?
+        } else {
+            match input.as_ref() {
+                Some(frame) => frame.clone(),
+                None => {
+                    return Err(GraphError::Internal(
+                        "routed run lost its input frame".to_string(),
+                    ));
+                }
+            }
+        };
+        let (_, graph) = graphs
+            .graphs
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == *id)
+            .ok_or_else(|| GraphError::Internal(format!("routed run has no graph for {id}")))?;
+        let mut run_outputs = graph.run(vec![("in", frame_in)])?;
+        let (_, out) = run_outputs
+            .pop()
+            .ok_or_else(|| GraphError::Internal(format!("{id} graph produced no output")))?;
+        outputs.push((*id, out));
+    }
+    if outputs.is_empty() {
+        return Err(GraphError::Internal(
+            "routed run has no tiles to process".to_string(),
+        ));
+    }
+    let general = graphs.general;
+    let scale = graphs.scale;
+    // The general graph's output is the base when it ran:
+    // it already holds every tile that resolves to the
+    // general path. Otherwise the first output is the base
+    // and every tile is overwritten from its own graph.
+    let (base_id, base) = if let Some(position) = outputs.iter().position(|(id, _)| *id == general)
+    {
+        let (_, base) = outputs.remove(position);
+        (general, base)
+    } else {
+        let (id, base) = outputs.remove(0);
+        (id, base)
+    };
+    composite_routed_outputs(base, base_id, &outputs, &map, general, scale)
 }
 
 /// The processing thread: pull frames, process them, publish the
@@ -443,14 +662,13 @@ fn run_processing(
     exit: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut result: Result<(), String> = Ok(());
-    let registry = crate::registry();
-    let config = crate::algorithm_config(&registry, algorithm);
-    match build_algorithm_graph(algorithm, &config, scale) {
-        Ok(mut graph) => {
-            let mut routing = FrameRouting::default();
+    let mut routing = FrameRouting::default();
+    match build_routed_graphs(algorithm, scale, &routing.profile) {
+        Ok(mut graphs) => {
             while !exit.load(Ordering::Relaxed) {
                 match backend.capture_frame() {
-                    Ok(Some(frame)) => match process_frame(&mut graph, frame, &mut routing) {
+                    Ok(Some(frame)) => match process_frame_routed(&mut graphs, frame, &mut routing)
+                    {
                         Ok(processed) => {
                             slot.publish(processed);
                             if !wake() {
@@ -538,25 +756,110 @@ mod tests {
             || (x == 13 && (4..15).contains(&y))
     }
 
-    /// A 32x16 frame: a text tile on the left, a flat tile on
-    /// the right.
-    fn text_and_flat_frame() -> Result<Frame, String> {
-        pixel_frame(32, 16, |x, y| {
-            if x < 16 {
-                if text_tile_ink(x, y) {
-                    [20, 20, 20]
-                } else {
-                    [240, 240, 240]
-                }
-            } else {
-                [200, 30, 90]
-            }
-        })
-    }
-
     /// A 48x16 frame: three flat tiles.
     fn three_flat_frame() -> Result<Frame, String> {
         pixel_frame(48, 16, |_, _| [200, 30, 90])
+    }
+
+    /// Run one frame through one single-algorithm graph and
+    /// return its output. The graph runs whole-frame with
+    /// no routing set, so the output is the direct processor
+    /// output for that algorithm.
+    fn run_single_graph(graph: &mut Graph, frame: Frame) -> Result<Frame, String> {
+        let mut outputs = graph.run(vec![("in", frame)]).map_err(|e| e.to_string())?;
+        match outputs.pop() {
+            Some((_, frame)) => Ok(frame),
+            None => Err("graph produced no output".to_string()),
+        }
+    }
+
+    /// Assert the output tile (`tx`, `ty`) of `actual`
+    /// equals the same tile of `expected`, row by row. The
+    /// tile is a full 16x16 source tile at `scale`.
+    fn assert_tile_region_eq(actual: &Frame, expected: &Frame, tx: u32, ty: u32, scale: u32) {
+        let x0 = tx as usize * 16 * scale as usize;
+        let y0 = ty as usize * 16 * scale as usize;
+        let width = 16 * scale as usize;
+        for row in 0..width {
+            let y = (y0 + row) as u32;
+            assert_eq!(
+                &actual.row(y)[x0 * 3..(x0 + width) * 3],
+                &expected.row(y)[x0 * 3..(x0 + width) * 3],
+                "tile ({tx}, {ty}) row {row} differs"
+            );
+        }
+    }
+
+    /// Assert the output tile (`tx`, `ty`) of `actual`
+    /// differs from the same tile of `expected` in at least
+    /// one row: the tile did not come from that algorithm.
+    fn assert_tile_region_differs(actual: &Frame, expected: &Frame, tx: u32, ty: u32, scale: u32) {
+        let x0 = tx as usize * 16 * scale as usize;
+        let y0 = ty as usize * 16 * scale as usize;
+        let width = 16 * scale as usize;
+        let mut differs = false;
+        for row in 0..width {
+            let y = (y0 + row) as u32;
+            if actual.row(y)[x0 * 3..(x0 + width) * 3] != expected.row(y)[x0 * 3..(x0 + width) * 3]
+            {
+                differs = true;
+                break;
+            }
+        }
+        assert!(differs, "tile ({tx}, {ty}) matches, expected it to differ");
+    }
+
+    /// A 96x16 frame with one tile per class: text, sprite,
+    /// flat, patterned, gradient, noise. The noise tile's
+    /// bytes are the LCG stream of the region-analysis noise
+    /// tile, so it classifies Unknown there and here.
+    fn six_tile_frame() -> Result<Frame, String> {
+        let mut state: u32 = 0x1234_5678;
+        let mut next_byte = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            u8::try_from(state >> 24).unwrap_or(0)
+        };
+        let mut noise = vec![[0_u8; 3]; 256];
+        for pixel in &mut noise {
+            *pixel = [next_byte(), next_byte(), next_byte()];
+        }
+        pixel_frame(96, 16, |x, y| {
+            let tile = x / 16;
+            let lx = x % 16;
+            match tile {
+                0 => {
+                    if text_tile_ink(lx, y) {
+                        [20, 20, 20]
+                    } else {
+                        [240, 240, 240]
+                    }
+                }
+                1 => {
+                    let in_body = (4..12).contains(&lx) && (3..13).contains(&y);
+                    let in_detail = (7..9).contains(&lx) && (6..8).contains(&y);
+                    if in_detail {
+                        [240, 220, 60]
+                    } else if in_body {
+                        [200, 40, 40]
+                    } else {
+                        [30, 30, 120]
+                    }
+                }
+                2 => [200, 30, 90],
+                3 => {
+                    if (lx / 2 + y / 2) % 2 == 0 {
+                        [20, 20, 20]
+                    } else {
+                        [235, 235, 235]
+                    }
+                }
+                4 => {
+                    let value = u8::try_from(lx * 17).unwrap_or(255);
+                    [value, value, value]
+                }
+                _ => noise[(y * 16 + lx) as usize],
+            }
+        })
     }
 
     /// The same frame with the middle tile replaced by the
@@ -916,10 +1219,9 @@ mod tests {
         }
         let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
         let direct = Nearest.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_algorithm_graph("nearest", &AlgorithmConfig::new(), 2)
+        let mut graph = build_algorithm_graph("nearest", &AlgorithmConfig::new(), 2, &[], true)
             .map_err(|e| e.to_string())?;
-        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
-            .map_err(|e| e.to_string())?;
+        let processed = run_single_graph(&mut graph, frame)?;
         assert_eq!((processed.width(), processed.height()), (8, 8));
         assert_eq!(processed.data(), direct.data());
         Ok(())
@@ -931,7 +1233,7 @@ mod tests {
         // adapters, so they agree: no adapter fails the
         // build with the reason, and an adapter builds it.
         if GpuContext::probe_adapters().is_empty() {
-            match build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2) {
+            match build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2, &[], true) {
                 Err(error) => {
                     assert!(
                         error.to_string().contains("no GPU adapter"),
@@ -941,7 +1243,7 @@ mod tests {
                 Ok(_) => panic!("expected a no-adapter error"),
             }
         } else {
-            let graph = build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2);
+            let graph = build_algorithm_graph("nearest-gpu", &AlgorithmConfig::new(), 2, &[], true);
             assert!(graph.is_ok(), "an adapter builds the GPU graph");
         }
     }
@@ -963,10 +1265,9 @@ mod tests {
         }
         let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
         let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
+        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2, &[], true)
             .map_err(|e| e.to_string())?;
-        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
-            .map_err(|e| e.to_string())?;
+        let processed = run_single_graph(&mut graph, frame)?;
         assert_eq!((processed.width(), processed.height()), (8, 8));
         assert_eq!(processed.format(), PixelFormat::Rgb8);
         assert_eq!(processed.data(), direct.data());
@@ -991,37 +1292,71 @@ mod tests {
         }
         let frame = Frame::new(4, 4, PixelFormat::Rgb8, data).map_err(|e| e.to_string())?;
         let direct = Bilinear.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_algorithm_graph("bilinear", &AlgorithmConfig::new(), 2)
+        let mut graph = build_algorithm_graph("bilinear", &AlgorithmConfig::new(), 2, &[], true)
             .map_err(|e| e.to_string())?;
-        let processed = process_frame(&mut graph, frame, &mut FrameRouting::default())
-            .map_err(|e| e.to_string())?;
+        let processed = run_single_graph(&mut graph, frame)?;
         assert_eq!((processed.width(), processed.height()), (8, 8));
         assert_eq!(processed.data(), direct.data());
         Ok(())
     }
 
     #[test]
-    fn routed_frame_resolves_all_routes_to_contour() -> Result<(), String> {
-        let frame = text_and_flat_frame()?;
-        let direct = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
-        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
-            .map_err(|e| e.to_string())?;
+    fn routed_frame_processes_each_tile_with_its_algorithm() -> Result<(), String> {
+        use pixelflow_processing::Nearest;
+        // Text tile on the left, flat tile on the right. The
+        // flat color is the pinned hard-light case: Contour
+        // shifts it, Nearest copies it exactly, so the two
+        // routes are distinguishable in the output.
+        let frame = pixel_frame(32, 16, |x, y| {
+            if x < 16 {
+                if text_tile_ink(x, y) {
+                    [20, 20, 20]
+                } else {
+                    [240, 240, 240]
+                }
+            } else {
+                [128, 64, 32]
+            }
+        })?;
+        let direct_contour = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
+        let direct_nearest = Nearest.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graphs = build_routed_graphs("contour", 2, &RoutingProfile::default())?;
         let mut routing = FrameRouting::default();
         let processed =
-            process_frame(&mut graph, frame, &mut routing).map_err(|e| e.to_string())?;
-        // Routing changes no pixels: every route resolves to
-        // the contour node.
-        assert_eq!(processed.data(), direct.data());
-        let table = graph
+            process_frame_routed(&mut graphs, frame, &mut routing).map_err(|e| e.to_string())?;
+        assert_eq!((processed.width(), processed.height()), (64, 32));
+        // The text tile went through Contour, the flat tile
+        // through Nearest: each region equals the direct
+        // output of its own algorithm, and the flat tile is
+        // not the Contour output.
+        assert_tile_region_eq(&processed, &direct_contour, 0, 0, 2);
+        assert_tile_region_eq(&processed, &direct_nearest, 1, 0, 2);
+        assert_tile_region_differs(&processed, &direct_contour, 1, 0, 2);
+        // The per-tile node lookup agrees: text resolves to
+        // the contour node, flat to the nearest node.
+        assert_eq!(
+            graphs.node_for_tile(0, 0, ContentClass::Text),
+            Some("contour")
+        );
+        assert_eq!(
+            graphs.node_for_tile(1, 0, ContentClass::Flat),
+            Some("nearest")
+        );
+        // The routing table on the contour graph names the
+        // text branch, and the flat tile routes to the flat
+        // branch on the nearest graph.
+        let table = graphs
+            .graph("contour")
+            .ok_or_else(|| "no contour graph".to_string())?
             .routing()
             .ok_or_else(|| "graph has no routing after a routed frame".to_string())?;
         assert_eq!(table.branch_for(0, 0), Some("text"));
-        assert_eq!(table.branch_for(1, 0), None);
-        assert_eq!(table.routed_count(), 1);
-        assert_eq!(graph.node_for_tile(0, 0), Some("contour"));
-        assert_eq!(graph.node_for_tile(1, 0), Some("contour"));
+        assert_eq!(table.branch_for(1, 0), Some("flat"));
+        assert_eq!(table.routed_count(), 2);
         // First frame: every tile is dirty.
-        let invalidated = graph
+        let invalidated = graphs
+            .graph("contour")
+            .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after a routed frame".to_string())?;
         assert_eq!(invalidated.count(), 2);
@@ -1029,12 +1364,55 @@ mod tests {
     }
 
     #[test]
+    fn routed_frame_matches_direct_algorithms_region_by_region() -> Result<(), String> {
+        use pixelflow_processing::{Bilinear, Nearest};
+        let frame = six_tile_frame()?;
+        let direct_contour = Contour.process(&frame, 2).map_err(|e| e.to_string())?;
+        let direct_nearest = Nearest.process(&frame, 2).map_err(|e| e.to_string())?;
+        let direct_bilinear = Bilinear.process(&frame, 2).map_err(|e| e.to_string())?;
+        let mut graphs = build_routed_graphs("contour", 2, &RoutingProfile::default())?;
+        let mut routing = FrameRouting::default();
+        let processed =
+            process_frame_routed(&mut graphs, frame, &mut routing).map_err(|e| e.to_string())?;
+        assert_eq!((processed.width(), processed.height()), (192, 32));
+        // The retained map names each tile's class: the
+        // routing the run used, not a re-derivation here.
+        let map = routing
+            .previous_map
+            .clone()
+            .ok_or_else(|| "no region map after the routed frame".to_string())?;
+        let expected = [
+            (ContentClass::Text, "contour"),
+            (ContentClass::Sprite, "contour"),
+            (ContentClass::Flat, "nearest"),
+            (ContentClass::Patterned, "nearest"),
+            (ContentClass::Gradient, "bilinear"),
+            (ContentClass::Unknown, "contour"),
+        ];
+        for (index, (class, algorithm)) in expected.iter().enumerate() {
+            let tx = u32::try_from(index).map_err(|err| err.to_string())?;
+            assert_eq!(
+                map.tile(tx, 0).map(|tile| tile.class),
+                Some(*class),
+                "tile {tx} class"
+            );
+            let direct = match *algorithm {
+                "contour" => &direct_contour,
+                "nearest" => &direct_nearest,
+                _ => &direct_bilinear,
+            };
+            assert_tile_region_eq(&processed, direct, tx, 0, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn second_frame_reuses_prior_classes_and_halo_invalidates() -> Result<(), String> {
-        let mut graph = build_algorithm_graph("contour", &AlgorithmConfig::new(), 2)
-            .map_err(|e| e.to_string())?;
+        use pixelflow_processing::Nearest;
+        let mut graphs = build_routed_graphs("contour", 2, &RoutingProfile::default())?;
         let mut routing = FrameRouting::default();
         let first = three_flat_frame()?;
-        process_frame(&mut graph, first, &mut routing).map_err(|e| e.to_string())?;
+        process_frame_routed(&mut graphs, first, &mut routing).map_err(|e| e.to_string())?;
         let first_map = routing
             .previous_map
             .clone()
@@ -1046,10 +1424,15 @@ mod tests {
         // Only the middle tile changes, into a text tile.
         let second = flat_text_flat_frame()?;
         let second_again = second.clone();
-        let direct = Contour.process(&second, 2).map_err(|e| e.to_string())?;
+        let direct_contour = Contour.process(&second, 2).map_err(|e| e.to_string())?;
+        let direct_nearest = Nearest.process(&second, 2).map_err(|e| e.to_string())?;
         let processed =
-            process_frame(&mut graph, second, &mut routing).map_err(|e| e.to_string())?;
-        assert_eq!(processed.data(), direct.data());
+            process_frame_routed(&mut graphs, second, &mut routing).map_err(|e| e.to_string())?;
+        // The side tiles stayed flat and went through
+        // Nearest; the middle tile went through Contour.
+        assert_tile_region_eq(&processed, &direct_nearest, 0, 0, 2);
+        assert_tile_region_eq(&processed, &direct_contour, 1, 0, 2);
+        assert_tile_region_eq(&processed, &direct_nearest, 2, 0, 2);
         let second_map = routing
             .previous_map
             .as_ref()
@@ -1066,21 +1449,31 @@ mod tests {
         // The class change invalidates the tile and its halo:
         // the pixel dirty set holds the middle tile, the halo
         // adds both neighbors.
-        let invalidated = graph
+        let invalidated = graphs
+            .graph("contour")
+            .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after the second frame".to_string())?;
         assert_eq!(invalidated.count(), 3);
         assert!(invalidated.is_dirty(0, 0));
         assert!(invalidated.is_dirty(1, 0));
         assert!(invalidated.is_dirty(2, 0));
-        // An identical third frame invalidates nothing.
-        let direct = Contour
+        // An identical third frame invalidates nothing and
+        // still routes each tile to its own algorithm.
+        let direct_contour = Contour
             .process(&second_again, 2)
             .map_err(|e| e.to_string())?;
-        let processed =
-            process_frame(&mut graph, second_again, &mut routing).map_err(|e| e.to_string())?;
-        assert_eq!(processed.data(), direct.data());
-        let invalidated = graph
+        let direct_nearest = Nearest
+            .process(&second_again, 2)
+            .map_err(|e| e.to_string())?;
+        let processed = process_frame_routed(&mut graphs, second_again, &mut routing)
+            .map_err(|e| e.to_string())?;
+        assert_tile_region_eq(&processed, &direct_nearest, 0, 0, 2);
+        assert_tile_region_eq(&processed, &direct_contour, 1, 0, 2);
+        assert_tile_region_eq(&processed, &direct_nearest, 2, 0, 2);
+        let invalidated = graphs
+            .graph("contour")
+            .ok_or_else(|| "no contour graph".to_string())?
             .routing_invalidated()
             .ok_or_else(|| "graph has no invalidation after the third frame".to_string())?;
         assert_eq!(invalidated.count(), 0);
