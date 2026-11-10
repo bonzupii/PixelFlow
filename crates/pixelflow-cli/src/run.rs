@@ -58,6 +58,51 @@ pub struct RunOptions {
     pub windowed: bool,
 }
 
+/// Open capture for the requested source, falling back to monitor
+/// when window capture fails. Window is the default; monitor is
+/// the fallback when window capture is unavailable, per the
+/// `CaptureConfig` contract. Any window initialize failure triggers
+/// the one monitor attempt: the failure modes that matter here
+/// (picker dismissed, backend cancelled, source unavailable) are
+/// all reported by the backend as an initialize error, and the
+/// fallback cannot tell a transient failure from a permanent one
+/// without retrying the dialog, so it attempts the fallback once
+/// and reports both failures when that also fails. The monitor
+/// attempt opens a fresh portal session on the same backend: a
+/// failed initialize leaves the backend uninitialized, so the
+/// second call starts a new session instead of reusing the failed
+/// one. Exactly one additional attempt, no retry loop.
+///
+/// # Errors
+///
+/// Returns the combined failure when the requested source and, for
+/// a window request, the monitor fallback both fail to initialize.
+fn initialize_capture(
+    backend: &mut impl CaptureBackend,
+    requested: SourceKind,
+) -> Result<SourceKind, String> {
+    match backend.initialize(&CaptureConfig::new(requested)) {
+        Ok(()) => Ok(requested),
+        Err(error) => {
+            if requested != SourceKind::Window {
+                return Err(format!("capture failed to start: {error}"));
+            }
+            eprintln!(
+                "pixelflow: window capture failed to start: {error}; attempting monitor capture as fallback"
+            );
+            match backend.initialize(&CaptureConfig::new(SourceKind::Monitor)) {
+                Ok(()) => {
+                    eprintln!("pixelflow: monitor capture started after window capture failed");
+                    Ok(SourceKind::Monitor)
+                }
+                Err(monitor_error) => Err(format!(
+                    "capture failed to start: window capture failed: {error}; monitor fallback also failed: {monitor_error}"
+                )),
+            }
+        }
+    }
+}
+
 /// Launch the target, capture its window, process frames, and present
 /// them until the window closes or the target exits.
 ///
@@ -84,15 +129,19 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         return Err(format!("{} exited before capture started", opts.program));
     }
     let mut backend = WaylandCapture::new();
-    if let Err(e) = backend.initialize(&CaptureConfig::new(opts.source)) {
-        // The child is already gone or cannot be killed; the capture
-        // error below is the one to report.
-        match launcher.kill() {
-            Ok(()) => {}
-            Err(_) => {}
+    let effective_source = match initialize_capture(&mut backend, opts.source) {
+        Ok(source) => source,
+        Err(e) => {
+            // The child is already gone or cannot be killed; the capture
+            // error below is the one to report.
+            match launcher.kill() {
+                Ok(()) => {}
+                Err(_) => {}
+            }
+            return Err(e);
         }
-        return Err(format!("capture failed to start: {e}"));
-    }
+    };
+    eprintln!("pixelflow: capturing {effective_source}");
     let slot = Arc::new(FrameSlot::new());
     let exit = Arc::new(AtomicBool::new(false));
     let processing_exit = exit.clone();
@@ -403,6 +452,7 @@ fn run_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixelflow_capture::CaptureError;
     use pixelflow_core::{PixelFormat, Processor};
     use pixelflow_processing::Contour;
     use pixelflow_processing::region_analysis::ContentClass;
@@ -517,6 +567,108 @@ mod tests {
             matches!(&result, Err(e) if e.contains("exited before capture started")),
             "the error names the early exit"
         );
+    }
+
+    /// A capture backend that succeeds only for the listed sources,
+    /// recording every initialize call, for the fallback tests.
+    struct StubBackend {
+        succeeds: Vec<SourceKind>,
+        attempts: Vec<SourceKind>,
+    }
+
+    impl StubBackend {
+        fn new(succeeds: Vec<SourceKind>) -> StubBackend {
+            StubBackend {
+                succeeds,
+                attempts: Vec::new(),
+            }
+        }
+    }
+
+    impl CaptureBackend for StubBackend {
+        fn initialize(&mut self, config: &CaptureConfig) -> Result<(), CaptureError> {
+            self.attempts.push(config.source);
+            if self.succeeds.contains(&config.source) {
+                Ok(())
+            } else {
+                Err(CaptureError::SessionFailed(format!(
+                    "{} capture unavailable in the stub",
+                    config.source
+                )))
+            }
+        }
+
+        fn capture_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
+            Ok(None)
+        }
+
+        fn shutdown(&mut self) -> Result<(), CaptureError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn window_success_needs_no_fallback() {
+        let mut backend = StubBackend::new(vec![SourceKind::Window]);
+        let result = initialize_capture(&mut backend, SourceKind::Window);
+        assert_eq!(result, Ok(SourceKind::Window));
+        assert_eq!(backend.attempts, vec![SourceKind::Window]);
+    }
+
+    #[test]
+    fn window_failure_falls_back_to_monitor() {
+        let mut backend = StubBackend::new(vec![SourceKind::Monitor]);
+        let result = initialize_capture(&mut backend, SourceKind::Window);
+        assert_eq!(result, Ok(SourceKind::Monitor));
+        assert_eq!(
+            backend.attempts,
+            vec![SourceKind::Window, SourceKind::Monitor],
+            "the fallback attempts monitor on the same backend after window fails"
+        );
+    }
+
+    #[test]
+    fn both_failures_are_named_in_the_error() {
+        let mut backend = StubBackend::new(vec![]);
+        let result = initialize_capture(&mut backend, SourceKind::Window);
+        assert!(result.is_err(), "expected both attempts to fail");
+        if let Err(error) = result {
+            assert!(
+                error.contains("window capture failed"),
+                "the error names the window failure: {error}"
+            );
+            assert!(
+                error.contains("monitor fallback also failed"),
+                "the error names the monitor failure: {error}"
+            );
+            assert!(
+                error.contains("window capture unavailable"),
+                "the error carries the window failure itself: {error}"
+            );
+            assert!(
+                error.contains("monitor capture unavailable"),
+                "the error carries the monitor failure itself: {error}"
+            );
+        }
+        assert_eq!(
+            backend.attempts,
+            vec![SourceKind::Window, SourceKind::Monitor],
+            "exactly one additional attempt, no retry loop"
+        );
+    }
+
+    #[test]
+    fn monitor_request_does_not_fall_back() {
+        let mut backend = StubBackend::new(vec![]);
+        let result = initialize_capture(&mut backend, SourceKind::Monitor);
+        assert!(result.is_err(), "expected the monitor attempt to fail");
+        if let Err(error) = result {
+            assert!(
+                !error.contains("fallback"),
+                "a monitor request has no fallback to attempt: {error}"
+            );
+        }
+        assert_eq!(backend.attempts, vec![SourceKind::Monitor]);
     }
 
     #[test]
