@@ -17,6 +17,14 @@ pub enum WaylandError {
         /// The source kinds the portal does offer.
         available: Vec<SourceKind>,
     },
+    /// The portal returned a stream of a different source kind
+    /// than the one requested.
+    SourceMismatch {
+        /// The source kind that was requested.
+        requested: SourceKind,
+        /// The source kind the portal actually returned.
+        actual: SourceKind,
+    },
     /// The portal started the session but returned no stream.
     NoStream,
     /// A `PipeWire` call failed. The message is the `PipeWire` error.
@@ -44,6 +52,12 @@ impl fmt::Display for WaylandError {
                     offered.join(", ")
                 )
             }
+            WaylandError::SourceMismatch { requested, actual } => {
+                write!(
+                    f,
+                    "requested {requested} capture but the portal returned a {actual} stream"
+                )
+            }
             WaylandError::NoStream => write!(f, "portal returned no stream"),
             WaylandError::PipeWire(msg) => write!(f, "pipewire error: {msg}"),
             WaylandError::UnsupportedFormat(msg) => {
@@ -62,9 +76,9 @@ impl From<WaylandError> for pixelflow_capture::CaptureError {
         use pixelflow_capture::CaptureError;
         match e {
             WaylandError::Portal(msg) => CaptureError::SessionFailed(msg),
-            WaylandError::SourceUnavailable { .. } | WaylandError::NoStream => {
-                CaptureError::SessionFailed(e.to_string())
-            }
+            WaylandError::SourceUnavailable { .. }
+            | WaylandError::SourceMismatch { .. }
+            | WaylandError::NoStream => CaptureError::SessionFailed(e.to_string()),
             WaylandError::PipeWire(msg) | WaylandError::InvalidFrame(msg) => {
                 CaptureError::StreamFailed(msg)
             }

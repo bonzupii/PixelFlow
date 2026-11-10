@@ -166,6 +166,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_initialize_leaves_the_backend_reusable() {
+        // The monitor fallback calls initialize a second time on
+        // the same backend after the window attempt fails. That
+        // only opens a fresh session when the failed attempt left
+        // the backend uninitialized: a second call must reach the
+        // portal again instead of failing as already initialized.
+        let mut backend = WaylandCapture::new();
+        let window = CaptureConfig::new(SourceKind::Window);
+        let first = backend.initialize(&window);
+        assert!(first.is_err(), "expected the window attempt to fail");
+        let monitor = CaptureConfig::new(SourceKind::Monitor);
+        let second = backend.initialize(&monitor);
+        assert!(second.is_err(), "expected the monitor attempt to fail");
+        assert!(
+            !matches!(&second, Err(e) if e.to_string().contains("already initialized")),
+            "the second attempt must not fail as already initialized, got {second:?}"
+        );
+        assert!(
+            backend.shutdown().is_ok(),
+            "shutdown of a twice-failed backend succeeds"
+        );
+    }
+
+    #[test]
     fn capture_frame_before_initialize_is_an_error() {
         let mut backend = WaylandCapture::new();
         let result = backend.capture_frame();

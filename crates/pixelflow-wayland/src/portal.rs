@@ -18,7 +18,7 @@ use crate::WaylandError;
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::desktop::screencast::{
     CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
-    StartCastOptions,
+    StartCastOptions, Stream,
 };
 use ashpd::desktop::{PersistMode, Session};
 use futures_util::{FutureExt, StreamExt};
@@ -206,19 +206,70 @@ fn session_already_gone(error: &ashpd::Error) -> bool {
     format_ashpd_error(error).contains("does not exist at path")
 }
 
+/// Map a failed Start response read to the error the caller sees.
+/// A cancellation at Start is portal-side, the same as at
+/// `SelectSources`: backends that show their chooser at Start fail
+/// here when the dialog is dismissed. The code cannot tell
+/// dismissal from a backend cancellation, so the error says both
+/// and asserts neither.
+fn start_response_error(error: &ashpd::Error) -> WaylandError {
+    if matches!(
+        error,
+        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
+    ) {
+        WaylandError::Portal(format!(
+            "read start response: {}; the portal cancelled the request: the source picker dialog was dismissed, or the compositor backend cancelled the request",
+            format_ashpd_error(error)
+        ))
+    } else {
+        portal_error("read start response", error)
+    }
+}
+
+/// Verify the started stream is the requested source kind. The
+/// compositor owns source selection and shows its own dialog, so
+/// the stream it returns can be a different source kind than the
+/// one requested: the user picks another source, or the backend
+/// substitutes one. The run must not silently record the wrong
+/// source, so a stream whose type differs from the request fails
+/// the open naming both kinds. A type the code does not map to a
+/// source kind fails the same way, naming the raw type instead.
+fn verify_stream_source(
+    stream: &Stream,
+    requested: SourceKind,
+    want: SourceType,
+    handle: &str,
+) -> Result<(), WaylandError> {
+    let actual_type = stream.source_type();
+    if actual_type == Some(want) {
+        return Ok(());
+    }
+    let actual = match actual_type {
+        Some(actual) if actual == SourceType::WINDOW => Some(SourceKind::Window),
+        Some(actual) if actual == SourceType::MONITOR => Some(SourceKind::Monitor),
+        _ => None,
+    };
+    Err(match actual {
+        Some(actual) => WaylandError::SourceMismatch { requested, actual },
+        None => WaylandError::Portal(format!(
+            "session {handle}: requested {requested} capture but the portal returned a stream with source type {actual_type:?}"
+        )),
+    })
+}
+
 impl PortalSession {
     /// Create a session, request the source kind, and start the
     /// capture. Blocks until the user answers the compositor dialog
-    /// or the request fails.
-    ///
+    /// or the request fails.    ///
     /// # Errors
     ///
     /// Returns `Portal` when the D-Bus or portal call fails (no
     /// portal on this machine, dialog denied, selection refused, or
     /// the portal closed the session before it started),
     /// `SourceUnavailable` when the compositor does not offer the
-    /// requested source kind, and `NoStream` when the started
-    /// session returns no stream.
+    /// requested source kind, `SourceMismatch` when the started
+    /// session returns a stream of another source kind, and
+    /// `NoStream` when the started session returns no stream.
     pub fn open(source: SourceKind) -> Result<PortalSession, WaylandError> {
         let opened = portal_runtime()?.block_on(async { Self::open_async(source).await })?;
         Ok(PortalSession {
@@ -287,7 +338,17 @@ impl PortalSession {
             .map_err(|e| portal_error("create session", &e))?;
         let handle = format!("{session:?}");
         eprintln!("pixelflow: portal: session {handle} created");
-        match Self::run_session(&proxy, &session, &handle, want, cursor_mode, version).await {
+        match Self::run_session(
+            &proxy,
+            &session,
+            &handle,
+            source,
+            want,
+            cursor_mode,
+            version,
+        )
+        .await
+        {
             Ok(outcome) => Ok(Opened {
                 session,
                 fd: outcome.fd,
@@ -332,6 +393,7 @@ impl PortalSession {
         proxy: &Screencast,
         session: &Session<Screencast>,
         handle: &str,
+        requested: SourceKind,
         want: SourceType,
         cursor_mode: Option<CursorMode>,
         version: u32,
@@ -414,9 +476,7 @@ impl PortalSession {
                 return Err(portal_error(&format!("start session{note}"), &error));
             }
         };
-        let streams = start
-            .response()
-            .map_err(|e| portal_error("read start response", &e))?;
+        let streams = start.response().map_err(|e| start_response_error(&e))?;
         // The portal can close the session while the Start response
         // is in flight, so check again before opening the PipeWire
         // remote: opening it on a closed session fails, and the
@@ -428,6 +488,7 @@ impl PortalSession {
         }
         let count = streams.streams().len();
         let stream = streams.streams().first().ok_or(WaylandError::NoStream)?;
+        verify_stream_source(stream, requested, want, handle)?;
         let node_id = stream.pipe_wire_node_id();
         let serial = stream.pipewire_serial();
         if node_id == 0 && serial.is_none() {

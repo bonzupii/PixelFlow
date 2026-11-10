@@ -51,6 +51,12 @@ struct MockConfig {
     select_response: u32,
     /// Response code for `Start`: 0 success, 1 cancelled.
     start_response: u32,
+    /// Source type the mock reports for the started stream, when
+    /// set: 2 window, 1 monitor. When unset, the mock reports the
+    /// type the last `SelectSources` call requested, so a normal
+    /// open returns the requested kind and only an explicit
+    /// override produces a mismatch.
+    start_source_type: Option<u32>,
     /// Serial the mock reports for the started stream, if any.
     serial: Option<u64>,
     /// Report the serial under the hyphenated `pipewire-serial`
@@ -69,6 +75,7 @@ impl Default for MockConfig {
             cursor_modes: 7,
             select_response: 0,
             start_response: 0,
+            start_source_type: None,
             serial: Some(987_654_321),
             serial_hyphenated: false,
             faults: MockFaults::default(),
@@ -283,11 +290,16 @@ impl MockScreencast {
         let sender = sender_name(&header)?;
         let request = request_path(&sender, &options)
             .ok_or_else(|| fdo::Error::Failed("no handle token in Start".to_string()))?;
-        let (code, serial, serial_hyphenated, emit_closed) = {
+        let (code, source_type, serial, serial_hyphenated, emit_closed) = {
             let mut state = lock_state(&self.state);
             state.record.start_parents.push(parent_window);
             (
                 state.config.start_response,
+                state
+                    .config
+                    .start_source_type
+                    .or_else(|| state.record.selects.last().and_then(|select| select.types))
+                    .unwrap_or(2),
                 state.config.serial,
                 state.config.serial_hyphenated,
                 state.config.faults.emit_closed_after_start,
@@ -309,7 +321,7 @@ impl MockScreencast {
         if code == 0 {
             let mut properties: HashMap<String, Variant<'static>> = HashMap::new();
             properties.insert("size".to_string(), Variant::new((1920i32, 1080i32)));
-            properties.insert("source_type".to_string(), Variant::new(2u32));
+            properties.insert("source_type".to_string(), Variant::new(source_type));
             if let Some(serial) = serial {
                 // The hyphenated key is what a real portal wires;
                 // the underscore key is what ashpd 0.14 reads.
@@ -606,6 +618,202 @@ async fn scenario_cancelled_selection(
     Ok(())
 }
 
+/// Source-type mismatch: the portal returns a monitor stream for
+/// a window request. Opening fails naming the requested window
+/// and the actual monitor, the `PipeWire` remote is never opened,
+/// and the session is closed.
+async fn scenario_source_type_mismatch(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let closes_before = lock_state(state).record.closes.len();
+    let opens_before = lock_state(state).record.opens.len();
+    {
+        let mut state = lock_state(state);
+        state.config.select_response = 0;
+        state.config.start_response = 0;
+        state.config.start_source_type = Some(1);
+        state.config.faults.session_gone_on_close = false;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "a mismatched stream must fail the open");
+    if let Err(error) = failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("window"),
+            "the failure names the requested window capture: {text}"
+        );
+        assert!(
+            text.contains("monitor"),
+            "the failure names the actual monitor stream: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(state).record.opens.len(),
+        opens_before,
+        "the PipeWire remote was never opened for the mismatched stream"
+    );
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 1,
+        "the partial session was closed after the mismatch"
+    );
+    lock_state(state).config.start_source_type = None;
+    Ok(())
+}
+
+/// Window fails, monitor opens on a fresh session: the window
+/// attempt is cancelled at selection, its session is created and
+/// closed, and the monitor attempt then creates a second, different
+/// session and opens.
+async fn scenario_window_fails_monitor_fresh_session(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let creates_before = lock_state(state).record.creates;
+    let closes_before = lock_state(state).record.closes.len();
+    {
+        let mut state = lock_state(state);
+        state.config.select_response = 1;
+        state.config.start_response = 0;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "the cancelled window attempt must fail");
+    assert_eq!(
+        lock_state(state).record.creates,
+        creates_before + 1,
+        "the failed window attempt created a session"
+    );
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 1,
+        "the failed window session was closed"
+    );
+    let failed_session = lock_state(state)
+        .record
+        .closes
+        .last()
+        .cloned()
+        .ok_or_else(|| "no close was recorded for the failed window session".to_string())?;
+    {
+        let mut state = lock_state(state);
+        state.config.select_response = 0;
+    }
+    let opened = open_with_timeout(SourceKind::Monitor).await??;
+    assert_eq!(
+        lock_state(state).record.creates,
+        creates_before + 2,
+        "the monitor attempt created a second session"
+    );
+    let monitor_session = lock_state(state)
+        .record
+        .opens
+        .last()
+        .map(|open| open.session.clone())
+        .ok_or_else(|| {
+            "no PipeWire remote open was recorded for the monitor session".to_string()
+        })?;
+    assert_ne!(
+        monitor_session, failed_session,
+        "the monitor session is a different session object than the failed window session"
+    );
+    {
+        let state = lock_state(state);
+        assert_eq!(
+            state.record.selects.last().and_then(|select| select.types),
+            Some(1),
+            "the monitor attempt requested the monitor source"
+        );
+    }
+    close_with_timeout(opened).await??;
+    Ok(())
+}
+
+/// Both sources fail: the window attempt and the monitor attempt
+/// each fail at selection, each on its own fresh session, and each
+/// session is closed.
+async fn scenario_both_sources_fail(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let creates_before = lock_state(state).record.creates;
+    let closes_before = lock_state(state).record.closes.len();
+    {
+        let mut state = lock_state(state);
+        state.config.select_response = 1;
+        state.config.start_response = 0;
+    }
+    let window_failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(window_failed.is_err(), "the window attempt must fail");
+    if let Err(error) = window_failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("select sources response") && text.contains("cancelled"),
+            "the window failure names the cancelled selection: {text}"
+        );
+    }
+    let monitor_failed = open_with_timeout(SourceKind::Monitor).await?;
+    assert!(monitor_failed.is_err(), "the monitor attempt must fail");
+    if let Err(error) = monitor_failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("select sources response") && text.contains("cancelled"),
+            "the monitor failure names the cancelled selection: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(state).record.creates,
+        creates_before + 2,
+        "each failed attempt created its own session"
+    );
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 2,
+        "each failed session was closed"
+    );
+    Ok(())
+}
+
+/// Start cancelled: opening fails naming the start response, says
+/// the portal cancelled, and names the two portal-side causes,
+/// the same diagnostic as a cancelled selection. The partial
+/// session is closed.
+async fn scenario_cancelled_start(
+    state: &Arc<Mutex<MockState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let closes_before = lock_state(state).record.closes.len();
+    {
+        let mut state = lock_state(state);
+        state.config.faults.emit_closed_after_select = false;
+        state.config.faults.emit_closed_after_start = false;
+        state.config.start_response = 1;
+    }
+    let failed = open_with_timeout(SourceKind::Window).await?;
+    assert!(failed.is_err(), "a cancelled start must fail the open");
+    if let Err(error) = failed {
+        let text = error.to_string();
+        assert!(
+            text.contains("read start response"),
+            "the failure names the start response: {text}"
+        );
+        assert!(
+            text.contains("cancelled"),
+            "the failure says the portal cancelled: {text}"
+        );
+        assert!(
+            text.contains("source picker dialog was dismissed"),
+            "the failure names the picker dismissal as a possible cause: {text}"
+        );
+        assert!(
+            text.contains("compositor backend cancelled the request"),
+            "the failure names the backend cancellation as a possible cause: {text}"
+        );
+    }
+    assert_eq!(
+        lock_state(state).record.closes.len(),
+        closes_before + 1,
+        "the partial session was closed after the cancelled start"
+    );
+    Ok(())
+}
+
 /// The portal closes the session after Start succeeds: opening
 /// fails naming the closure, and the `PipeWire` remote is never
 /// opened on the closed session.
@@ -690,6 +898,12 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
 
     scenario_cancelled_selection(&state).await?;
 
+    scenario_source_type_mismatch(&state).await?;
+
+    scenario_window_fails_monitor_fresh_session(&state).await?;
+
+    scenario_both_sources_fail(&state).await?;
+
     // The portal closes the session after selection: opening fails
     // naming the closure, and Start is never called.
     {
@@ -716,29 +930,7 @@ async fn mock_portal_session_lifecycle() -> Result<(), Box<dyn std::error::Error
 
     scenario_closed_after_start(&state).await?;
 
-    // Start cancelled: opening fails naming the start response, and
-    // the partial session is closed.
-    let closes_before = lock_state(&state).record.closes.len();
-    {
-        let mut state = lock_state(&state);
-        state.config.faults.emit_closed_after_select = false;
-        state.config.faults.emit_closed_after_start = false;
-        state.config.start_response = 1;
-    }
-    let failed = open_with_timeout(SourceKind::Window).await?;
-    assert!(failed.is_err(), "a cancelled start must fail the open");
-    if let Err(error) = failed {
-        let text = error.to_string();
-        assert!(
-            text.contains("read start response"),
-            "the failure names the start response: {text}"
-        );
-    }
-    assert_eq!(
-        lock_state(&state).record.closes.len(),
-        closes_before + 1,
-        "the partial session was closed after the cancelled start"
-    );
+    scenario_cancelled_start(&state).await?;
 
     drop(connection);
     Ok(())
