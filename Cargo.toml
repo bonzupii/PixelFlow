@@ -33,6 +33,8 @@ pollster = "0.4"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "deny"
+warnings = "deny"
+unused_must_use = "deny"
 
 [workspace.lints.clippy]
 all = "deny"

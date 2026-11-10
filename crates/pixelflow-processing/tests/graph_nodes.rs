@@ -46,13 +46,17 @@ fn contour_declares_global_and_nearest_declares_local() {
 fn chain_matches_direct_processor_output() -> Result<(), String> {
     let frame = diagonal_frame()?.with_sequence(5);
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("nearest", Box::new(Nearest::node(2)));
-    builder.add_node("contour", Box::new(Contour::node(2)));
-    builder.connect(Source::input("in"), "nearest", "in");
-    builder.connect(Source::node("nearest", "out"), "contour", "in");
-    builder.add_output("out", "contour", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("nearest", Box::new(Nearest::node(2)))
+            .add_node("contour", Box::new(Contour::node(2)))
+            .connect(Source::input("in"), "nearest", "in")
+            .connect(Source::node("nearest", "out"), "contour", "in")
+            .add_output("out", "contour", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let outputs = graph
         .run(vec![("in", frame.clone())])
         .map_err(|e| e.to_string())?;
@@ -71,14 +75,18 @@ fn chain_matches_direct_processor_output() -> Result<(), String> {
 fn branch_matches_direct_outputs() -> Result<(), String> {
     let frame = diagonal_frame()?;
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("contour", Box::new(Contour::node(2)));
-    builder.add_node("nearest", Box::new(Nearest::node(2)));
-    builder.connect(Source::input("in"), "contour", "in");
-    builder.connect(Source::input("in"), "nearest", "in");
-    builder.add_output("smooth", "contour", "out");
-    builder.add_output("blocky", "nearest", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("contour", Box::new(Contour::node(2)))
+            .add_node("nearest", Box::new(Nearest::node(2)))
+            .connect(Source::input("in"), "contour", "in")
+            .connect(Source::input("in"), "nearest", "in")
+            .add_output("smooth", "contour", "out")
+            .add_output("blocky", "nearest", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let outputs = graph
         .run(vec![("in", frame.clone())])
         .map_err(|e| e.to_string())?;
@@ -114,11 +122,15 @@ fn strided_input_through_contour_node_matches_tight() -> Result<(), String> {
         Frame::new_with_stride(4, 4, PixelFormat::Rgb8, 16, padded).map_err(|e| e.to_string())?;
     let run = |input: Frame| -> Result<Frame, String> {
         let mut builder = GraphBuilder::new();
-        builder.add_input("in", PixelFormat::Rgb8);
-        builder.add_node("contour", Box::new(Contour::node(2)));
-        builder.connect(Source::input("in"), "contour", "in");
-        builder.add_output("out", "contour", "out");
-        let mut graph = builder.build().map_err(|e| e.to_string())?;
+        let mut graph = std::mem::take(
+            builder
+                .add_input("in", PixelFormat::Rgb8)
+                .add_node("contour", Box::new(Contour::node(2)))
+                .connect(Source::input("in"), "contour", "in")
+                .add_output("out", "contour", "out"),
+        )
+        .build()
+        .map_err(|e| e.to_string())?;
         let mut outputs = graph.run(vec![("in", input)]).map_err(|e| e.to_string())?;
         outputs
             .pop()
@@ -135,11 +147,15 @@ fn strided_input_through_contour_node_matches_tight() -> Result<(), String> {
 fn unsupported_scale_fails_through_the_graph() -> Result<(), String> {
     let frame = diagonal_frame()?;
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("contour", Box::new(Contour::node(3)));
-    builder.connect(Source::input("in"), "contour", "in");
-    builder.add_output("out", "contour", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("contour", Box::new(Contour::node(3)))
+            .connect(Source::input("in"), "contour", "in")
+            .add_output("out", "contour", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let result = graph.run(vec![("in", frame)]);
     assert!(matches!(
         result,
@@ -161,11 +177,15 @@ fn limited_contour_node_declares_global_and_matches_direct_output() -> Result<()
     assert_eq!(node.name(), "contour");
     assert_eq!(node.spatial_dependency(), SpatialDependency::Global);
     let mut builder = GraphBuilder::new();
-    builder.add_input("in", PixelFormat::Rgb8);
-    builder.add_node("contour", Box::new(node));
-    builder.connect(Source::input("in"), "contour", "in");
-    builder.add_output("out", "contour", "out");
-    let mut graph = builder.build().map_err(|e| e.to_string())?;
+    let mut graph = std::mem::take(
+        builder
+            .add_input("in", PixelFormat::Rgb8)
+            .add_node("contour", Box::new(node))
+            .connect(Source::input("in"), "contour", "in")
+            .add_output("out", "contour", "out"),
+    )
+    .build()
+    .map_err(|e| e.to_string())?;
     let outputs = graph
         .run(vec![("in", frame.clone())])
         .map_err(|e| e.to_string())?;
