@@ -49,9 +49,17 @@ impl CaptureBackend for WaylandCapture {
         }
         let mut portal = PortalSession::open(config.source).map_err(CaptureError::from)?;
         let Some(fd) = portal.take_fd() else {
-            return Err(CaptureError::SessionFailed(
-                "portal session has no PipeWire remote".to_string(),
-            ));
+            // The session owns the portal session until it is
+            // closed, so a missing fd still closes it instead of
+            // leaking it on the portal side.
+            return Err(match portal.close() {
+                Ok(()) => {
+                    CaptureError::SessionFailed("portal session has no PipeWire remote".to_string())
+                }
+                Err(close_failure) => CaptureError::SessionFailed(format!(
+                    "portal session has no PipeWire remote; portal close also failed: {close_failure}"
+                )),
+            });
         };
         let node_id = portal.node_id;
         let target = StreamTarget::from_portal(portal.serial, node_id);
