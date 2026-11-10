@@ -259,9 +259,13 @@ Contour product algorithm; do not confuse the two.
 - `warnings` and `unused_must_use` are denied workspace-wide (commit
   `8fb32af`).
 - Full suite at `8fb32af`: 145 passed / 0 failed, regression exact,
-  per the driver body. Baseline `cargo test --workspace` at `4b1289a`
-  was running at the time this document was written; its result is
-  recorded separately when it lands.
+  per the driver body. Baseline at `4b1289a` verified by the
+  coordinator (debug, 2026-11-10, `cargo test --workspace`, exit 0):
+  155 passed / 0 failed — core 28, graph 22, CLI 12, present 7,
+  processing 2 + budget 6 + graph_nodes 6 + region_analysis 26,
+  regression 3, synthetic 17, wayland 25, mock_portal 1. The
+  regression run did not set `PIXELFLOW_FIXTURES_DIR`, so
+  fixture-based regression identity was not exercised in this run.
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
