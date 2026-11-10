@@ -151,8 +151,8 @@ let registry = AlgorithmRegistry::builtin();
 ```
 
 - `AlgorithmRegistry::new()` — an empty registry.
-- `AlgorithmRegistry::builtin()` — Contour, Nearest, and
-  Bilinear registered, in that order.
+- `AlgorithmRegistry::builtin()` — Contour, Nearest,
+  Bilinear, and PixelFlow registered, in that order.
 - `register(Box<dyn AlgorithmFactory>)` — register one
   algorithm. Registering an id that is already registered
   replaces the earlier entry, so an external algorithm can

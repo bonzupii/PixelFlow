@@ -25,10 +25,13 @@ fn frame_2x2() -> Result<Frame, String> {
 }
 
 #[test]
-fn builtin_registry_lists_three_algorithms() {
+fn builtin_registry_lists_four_algorithms() {
     let registry = AlgorithmRegistry::builtin();
-    assert_eq!(registry.ids(), vec!["contour", "nearest", "bilinear"]);
-    assert_eq!(registry.descriptors().len(), 3);
+    assert_eq!(
+        registry.ids(),
+        vec!["contour", "nearest", "bilinear", "pixelflow"]
+    );
+    assert_eq!(registry.descriptors().len(), 4);
 }
 
 #[test]
@@ -45,13 +48,14 @@ fn unknown_algorithm_error_lists_the_registered_ids() {
                 "contour".to_string(),
                 "nearest".to_string(),
                 "bilinear".to_string(),
+                "pixelflow".to_string(),
             ],
         }
     );
     assert!(
         error
             .to_string()
-            .contains("available: contour, nearest, bilinear")
+            .contains("available: contour, nearest, bilinear, pixelflow")
     );
 }
 

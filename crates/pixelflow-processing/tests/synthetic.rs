@@ -23,7 +23,7 @@
 //! shift rows, and the test would catch it.
 
 use pixelflow_core::{Frame, PixelFormat, ProcessError, Processor};
-use pixelflow_processing::{Contour, Nearest};
+use pixelflow_processing::{Contour, Nearest, PixelFlow};
 
 /// Reduce a value into one byte. The modulo makes the conversion
 /// infallible; the fallback arm is unreachable by construction.
@@ -731,6 +731,157 @@ fn nearest_baseline_replicates_blocks_exactly() -> Result<(), String> {
                 );
                 assert_eq!(got, want, "at {scale}x pixel ({out_col},{out_row})");
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pixelflow_tiny_images_complete_at_both_scales() -> Result<(), String> {
+    let algo = PixelFlow;
+    for (width, height) in [(1, 1), (2, 1), (1, 2), (2, 2), (3, 3), (1, 4), (4, 1)] {
+        let input = rgb_frame(width, height, |col, row| {
+            [
+                byte_of(col * 37 + row * 91),
+                byte_of(col * 11 + row * 53),
+                128,
+            ]
+        })?;
+        for scale in [2, 4] {
+            let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
+            let scale_u = u32::try_from(scale).map_err(|err| err.to_string())?;
+            let scale_us = usize::try_from(scale).map_err(|err| err.to_string())?;
+            assert_eq!(
+                (out.width(), out.height()),
+                (
+                    u32::try_from(width).map_err(|err| err.to_string())? * scale_u,
+                    u32::try_from(height).map_err(|err| err.to_string())? * scale_u
+                ),
+                "{width}x{height} at {scale}x: dims"
+            );
+            assert_eq!(out.format(), PixelFormat::Rgb8);
+            assert_eq!(out.data().len(), width * scale_us * height * scale_us * 3);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pixelflow_flat_color_is_preserved_exactly() -> Result<(), String> {
+    // Re-measurement 1: flat [128, 64, 32] goes through the crisp
+    // branch (guard weight 0), which leaves it untouched: shift
+    // 0, against the old Contour's hard-light shift of up to ~16.
+    let algo = PixelFlow;
+    let input = flat_frame(8, 8, [128, 64, 32])?;
+    for scale in [2, 4] {
+        let out = algo.process(&input, scale).map_err(|err| err.to_string())?;
+        assert_eq!(
+            distinct_colors(&out),
+            vec![[128, 64, 32]],
+            "flat [128,64,32] at {scale}x moved"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn pixelflow_checkerboard_matches_contour() -> Result<(), String> {
+    // A checkerboard is dither-like in the interior, so the
+    // guard weight is 1 there and the output is the soft branch
+    // exactly. The border band blends toward the crisp branch
+    // (the clamped edge makes border pixels non-lonely), so
+    // only the central region is compared: output pixels with
+    // coordinates in [3k, 5k), where the upsampled field samples
+    // only weight-1 source pixels.
+    let guard = PixelFlow;
+    let contour = Contour;
+    let input = rgb_frame(8, 8, |col, row| {
+        if (col + row) % 2 == 0 {
+            [0, 0, 0]
+        } else {
+            [255, 255, 255]
+        }
+    })?;
+    for scale in [2, 4] {
+        let from_guard = guard
+            .process(&input, scale)
+            .map_err(|err| err.to_string())?;
+        let from_contour = contour
+            .process(&input, scale)
+            .map_err(|err| err.to_string())?;
+        let scale_us = usize::try_from(scale).map_err(|err| err.to_string())?;
+        let out_w = 8 * scale_us;
+        for oy in 3 * scale_us..5 * scale_us {
+            for ox in 3 * scale_us..5 * scale_us {
+                let dst = (oy * out_w + ox) * 3;
+                assert_eq!(
+                    &from_guard.data()[dst..dst + 3],
+                    &from_contour.data()[dst..dst + 3],
+                    "checkerboard centre at {scale}x differs from the soft branch at ({ox}, {oy})"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pixelflow_strided_input_matches_tight_input() -> Result<(), String> {
+    let tight = rgb_frame(4, 4, |col, row| {
+        if col + row < 4 {
+            [200, 30, 30]
+        } else {
+            [30, 30, 200]
+        }
+    })?;
+    let mut data = vec![0u8; 4 * 16];
+    for y in 0..4 {
+        data[y * 16..y * 16 + 12]
+            .copy_from_slice(tight.row(u32::try_from(y).map_err(|err| err.to_string())?));
+    }
+    let strided = Frame::new_with_stride(4, 4, PixelFormat::Rgb8, 16, data)
+        .map_err(|err| err.to_string())?
+        .with_sequence(9);
+    let algo = PixelFlow;
+    let from_tight = algo.process(&tight, 2).map_err(|err| err.to_string())?;
+    let from_strided = algo.process(&strided, 2).map_err(|err| err.to_string())?;
+    assert_eq!(from_strided.data(), from_tight.data());
+    assert_eq!(from_strided.sequence(), 9);
+    assert_eq!(from_strided.timestamp(), strided.timestamp());
+    Ok(())
+}
+
+#[test]
+fn pixelflow_repeated_processing_is_deterministic() -> Result<(), String> {
+    let algo = PixelFlow;
+    let inputs: Vec<Frame> = vec![
+        flat_frame(8, 8, [128, 64, 32])?,
+        rgb_frame(32, 16, |col, row| {
+            if row * 2 < col {
+                [255, 255, 255]
+            } else {
+                [0, 0, 0]
+            }
+        })?,
+        rgb_frame(8, 8, |col, row| {
+            if (col + row) % 2 == 0 {
+                [0, 0, 0]
+            } else {
+                [255, 255, 255]
+            }
+        })?,
+    ];
+    for input in &inputs {
+        for scale in [2, 4] {
+            let first = algo.process(input, scale).map_err(|err| err.to_string())?;
+            let second = algo.process(input, scale).map_err(|err| err.to_string())?;
+            assert_eq!(
+                first.data(),
+                second.data(),
+                "{}x{} at {scale}x: second pass differs",
+                input.width(),
+                input.height()
+            );
         }
     }
     Ok(())

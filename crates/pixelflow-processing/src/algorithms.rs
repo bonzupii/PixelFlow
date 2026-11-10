@@ -3,3 +3,4 @@
 pub mod bilinear;
 pub mod contour;
 pub mod nearest;
+pub mod pixelflow;
