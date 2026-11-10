@@ -1,6 +1,6 @@
-//! Algorithm 20 from the retro upscaler experiments, as a library.
+//! Contour, the multi-stage restoration algorithm.
 //!
-//! 20 = 12 (combined) + `edge_follow2`, with no dither source anywhere.
+//! Contour = 12 (combined) + `edge_follow2`, with no dither source anywhere.
 //
 // This file is a transliteration of the Python reference
 // (upscale-experiments rounds 1-6, algos1-6.py). Its numeric output is
