@@ -1031,8 +1031,19 @@ In execution order (§11 of the owner directive):
    epx ported at `951a0b2` (bit-identical oracle, release suite
    306 passed / 0 failed). Nearest and bilinear are the
    repo's existing implementations, not reference ports. Next in
-   order: eagle, in flight under a driver-spawned port worker
-   (2026-11-11). Correction 2026-11-10: the sentence in the
+   order: eagle. A driver-spawned port worker attempted it
+   2026-11-11 and stopped before writing any port code: the base
+   gate fails on the unmodified base (libpipewire-0.3-dev wiped,
+   libspa-sys build fails), so no port landed, nothing was pushed,
+   and the worktree was removed. Resume after the libraries are
+   restored. Study done: reference `st_eagle`
+   (`pixelflow_scalers.rs:746`), native factor 2, registry entry
+   `Eagle`, port as id `eagle`, scales 2 and 4 (two 2x passes at
+   4x). Base-gate logs:
+   `goals/pixelflow/hidden_files/cg-eagle-verify-base-fmt.log`,
+   `cg-eagle-verify-base-build-release.log`,
+   `cg-eagle-verify-base-processing-only.log`.
+   Correction 2026-11-10: the sentence in the
    5240df4 record saying the owner is porting in sequence in
    `port/*` worktrees, so the driver spawns no port worker, was
    false on the record. The owner ported only PixelFlow himself,
