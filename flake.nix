@@ -29,7 +29,7 @@
           libXrandr
           libxcb
           vulkan-loader
-          xorg.xorgserver
+          xorg-server
           zsnes
           pkgsi686Linux.libX11
           pkgsi686Linux.libXext
