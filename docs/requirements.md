@@ -336,6 +336,52 @@ Contour product algorithm; do not confuse the two.
 
 ## 7. Known blockers and unverified items
 
+- Product framing correction (2026-11-10, owner): PixelFlow wraps a
+  program, intercepts its graphical output, and replaces it with an
+  upscaled enhanced fullscreen of the program. Graphics API
+  interception is the specified approach. PixelFlow is not a screen
+  recorder, not a desktop capture application, not a screencast
+  client, and not a tool for capturing arbitrary monitor contents
+  through a desktop portal. The ScreenCast/portal/PipeWire stack
+  described in the entries below is the superseded approach: it
+  entered the record as the 2026-11-09 Milestone 2 direction, not as
+  the owner's specification. The entries below are preserved as
+  record of that approach. The `run` command now uses interception
+  (`docs/interception.md`): an `LD_PRELOAD` shim interposes the
+  target's swap calls and streams its presented frames to PixelFlow.
+  The `--capture` flag is removed; there is no window/monitor source
+  selection and no monitor fallback. Live verification now happens
+  in this VM under a headless Wayland compositor with software
+  rendering, not on the owner's machine.
+- Live verification under a headless Wayland compositor
+  (2026-11-10, this VM): labwc 0.7.1 headless, 1280x720 output,
+  XWayland, Mesa lavapipe. A real GLX target (320x240, cycling
+  background, sliding yellow rectangle) was launched through
+  `pixelflow run` at 2x nearest, resolved to nearest-gpu on the
+  lavapipe adapter (GPU nearest matches CPU nearest exactly at
+  2x and 4x). Compositor screenshots show the upscaled target
+  fullscreen with correct letterboxing (160-pixel black bars
+  each side) and sustained motion (682,020 pixels differ between
+  shots 5 seconds apart). Shutdown defect found by this run and
+  fixed: killing the target left PixelFlow alive with its window
+  open indefinitely, because the processing thread set the exit
+  flag but sent no final wake and the presentation loop sleeps
+  on `ControlFlow::Wait`; the fix wakes the loop once more after
+  the exit flag is set (`crates/pixelflow-cli/src/run.rs`), with
+  a regression test asserting exactly one wake with no frames
+  published. Live after the fix, killing the target exits
+  PixelFlow in 1 second with exit code 0, and a relaunch run
+  starts, presents, and exits the same way. Halo finding,
+  recorded not fixed: 16x16 tiles the rectangle straddles
+  classify Sprite and route to Contour, whose hard-light stage
+  shifts the flat background inside those tiles from
+  (60, 0, 200) to (44, 0, 216); this is the known Contour
+  flat-color shift at tile granularity, an open product decision.
+  Still unverified: the EGL swap path, Vulkan interception,
+  input forwarding, live acceptance on a real desktop with a
+  hardware GPU, and 60 fps presentation (llvmpipe presents
+  about 9 fps at 2x nearest-gpu here). Full detail in
+  `docs/interception.md`.
 - Wayland live acceptance: UNVERIFIED. The portal fix (commit `4b5cbb4`)
   was verified claim-by-claim against the code by an independent
   verification worker (2026-11-10): cursor modes queried before use,

@@ -1,5 +1,14 @@
 # Wayland capture
 
+> Superseded (2026-11-10, owner correction): the ScreenCast approach
+> described in this document is no longer the `run` path. PixelFlow
+> wraps a program, intercepts its graphical output, and replaces it
+> with an upscaled enhanced fullscreen of the program; graphics API
+> interception is the specified approach (see
+> `docs/interception.md`). The portal/PipeWire stack remains in the
+> tree in `pixelflow-wayland` as record, but `run` no longer uses it.
+> The rest of this document is the historical record of that approach.
+
 PixelFlow captures a Wayland application window through the XDG
 Desktop Portal ScreenCast interface and reads the video frames
 from PipeWire. The compositor owns source selection: it shows its

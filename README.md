@@ -49,18 +49,17 @@ one; on a machine with no adapter use `nearest`.
 
 ```bash
 ./target/release/pixelflow run gtk-slashem
-./target/release/pixelflow run --capture monitor --scale 2 zsnes
+./target/release/pixelflow run --scale 2 zsnes
 ./target/release/pixelflow run --windowed gtk-slashem
 ./target/release/pixelflow run zsnes -- -s game.smc
 ```
 
-`run` launches the target unmodified, waits 2 seconds for it to start,
-then opens a portal ScreenCast session. The compositor asks which window
-or monitor to capture; PixelFlow does not check that the source picked
-belongs to the launched program. If window capture fails to start,
-PixelFlow tries monitor capture once on the same backend and reports the
-effective source. Press `f` to toggle between fullscreen and a windowed
-preview while the window runs.
+`run` launches the target with an interception shim preloaded, so
+the target's swap calls stream its presented frames to PixelFlow
+instead of presenting to the target's own window. PixelFlow waits
+up to 2 seconds for the first intercepted frame, or for the target
+to exit without producing one. Press `f` to toggle between
+fullscreen and a windowed preview while the window runs.
 
 The requested algorithm resolves through the registry: `nearest` becomes
 `nearest-gpu` when a GPU adapter is present, and the run reports the
@@ -69,13 +68,15 @@ adapter is an error, not a silent CPU run.
 
 ## Platform support
 
-- Capture runs on Linux with a Wayland compositor that provides XDG
-  Desktop Portal ScreenCast and PipeWire. Wayland is the only capture
-  backend. `upscale`, `backends`, `info`, and `algorithms` need no display
-  and work anywhere the binary builds.
-- Not implemented: X11 capture, Windows and macOS capture, input
-  forwarding, DMA-BUF buffers (a DMA-BUF buffer is a typed error, not a
-  silent fallback).
+- Capture runs on Linux by intercepting the target's graphics
+  output: an `LD_PRELOAD` shim interposes the target's GLX and EGL
+  swap calls and streams its presented frames to PixelFlow. The
+  target must present through GLX or EGL. `upscale`, `backends`,
+  `info`, and `algorithms` need no display and work anywhere the
+  binary builds.
+- Not implemented: Vulkan interception, input forwarding, DMA-BUF
+  buffers (a DMA-BUF buffer is a typed error, not a silent
+  fallback).
 - Presentation preserves aspect ratio by default: uniform scaling,
   contain-fit to the canvas, black bars on the one axis that does not
   fill (sides or top/bottom, not both), never stretch.
@@ -131,20 +132,23 @@ to fix silently; Contour output does not change until the owner decides.
   takes 80.5 ms per frame in release, about 5x over the 16.7 ms frame
   budget. No real-time claim is made. For a fast live path use
   `--algorithm nearest` at `--scale 2`.
-- **Live acceptance is unverified.** No end-to-end `run` has delivered
-  frames on a live Wayland desktop yet. The frame transport itself was
-  verified: a synthetic-source reproduction test (capture, slot,
-  processing, publish, wake, presenter receipt) passes on the base code,
-  so the live stall is Contour cost, not a transport defect. The missing
-  presentation window on the owner's machine is still unexplained
-  in-process: the window is created at loop start, independent of
-  frames. Control run on a machine with a Wayland desktop:
-  `pixelflow run <game> --capture monitor --scale 2 --algorithm nearest
-  --windowed` — expect a window within ~1 s; if no window appears there
-  either, the defect is presenter/adapter-side, not capture.
-- **GPU execution is unverified on a device.** The `nearest-gpu` node is
-  wired into the registry and the live path, but no adapter exists on
-  the build VM, so no GPU compute has run against hardware.
+- **Live acceptance under a headless Wayland compositor with
+  software rendering is the verification for this change.** See
+  `docs/interception.md` for what was verified and what was not:
+  real GLX target intercepted, processed, and presented
+  fullscreen under labwc; target-exit shutdown fixed and
+  verified live; relaunch verified. The EGL swap path is
+  implemented but unverified here (no EGL library is installed
+  in this VM), Vulkan interception is not implemented, and input
+  forwarding is not implemented.
+- **GPU execution ran on a software adapter, not hardware.**
+  The `nearest-gpu` node ran on llvmpipe (Mesa lavapipe) with
+  exact CPU parity at 2x and 4x, and the live path used it under
+  the headless compositor. No hardware GPU has run it. On
+  llvmpipe the pipeline presents about 9 frames per second at
+  2x nearest-gpu against an unthrottled source; the capture
+  queue drops oldest and presentation stays on the latest
+  frame.
 - **Region routing runs each tile through its class's algorithm.**
   Tiles are classified and routed per class: text and sprites through
   Contour, flat and patterned backgrounds through Nearest, gradients
@@ -159,8 +163,10 @@ to fix silently; Contour output does not change until the owner decides.
 
 - `docs/architecture.md` — crate layout, core types, the processing
   pipeline, capture, and presentation.
-- `docs/wayland.md` — the Wayland capture lifecycle, PipeWire buffers,
-  and input forwarding.
+- `docs/interception.md` — graphics interception: the `run` capture
+  mechanism, wire protocol, and verification.
+- `docs/wayland.md` — the superseded portal ScreenCast approach,
+  kept as record.
 - `docs/performance.md` — benchmark measurements for Contour, with the
   build profile stated for every number.
 - `docs/algorithm-integration.md` — the algorithm contract, the

@@ -4,6 +4,7 @@ members = [
     "crates/pixelflow-core",
     "crates/pixelflow-processing",
     "crates/pixelflow-capture",
+    "crates/pixelflow-intercept",
     "crates/pixelflow-wayland",
     "crates/pixelflow-present",
     "crates/pixelflow-cli",
@@ -20,6 +21,7 @@ authors = ["Bonzupii"]
 pixelflow-core = { path = "crates/pixelflow-core" }
 pixelflow-processing = { path = "crates/pixelflow-processing" }
 pixelflow-capture = { path = "crates/pixelflow-capture" }
+pixelflow-intercept = { path = "crates/pixelflow-intercept" }
 pixelflow-wayland = { path = "crates/pixelflow-wayland" }
 pixelflow-present = { path = "crates/pixelflow-present" }
 pixelflow-gpu = { path = "crates/pixelflow-gpu" }

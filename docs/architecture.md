@@ -11,12 +11,16 @@
   and processing.
 - `pixelflow-capture`: capture backend trait, source
   configuration, typed errors. Depends on core only.
+- `pixelflow-intercept`: the `LD_PRELOAD` shim that interposes the
+  target's swap calls, and the capture backend that turns the
+  streamed frames into core frames. Depends on core and capture.
 - `pixelflow-wayland`: XDG Desktop Portal ScreenCast plus a
-  PipeWire video stream. Depends on core and capture.
+  PipeWire video stream. Superseded; kept as record, no longer used
+  by `run`. Depends on core and capture.
 - `pixelflow-present`: the wgpu window. Depends on core only.
 - `pixelflow-cli`: the `pixelflow` binary. PNG I/O, the `upscale`
   and `run` commands, `backends`, `info`. Depends on core,
-  processing, capture, wayland, present, png, clap.
+  processing, capture, intercept, present, png, clap.
 
 Dependencies flow one way: core at the bottom, the CLI at the
 top. No crate depends on a crate above it, and no processing

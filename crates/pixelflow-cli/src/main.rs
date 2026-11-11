@@ -1,15 +1,14 @@
 //! PixelFlow command-line interface.
 //!
 //! Commands: `upscale` (PNG in, PNG out), `run` (launch an
-//! application, capture its window, upscale each frame, present it),
-//! `backends`, and `info`.
+//! application, intercept its presented frames, upscale each frame,
+//! present it), `backends`, and `info`.
 
 mod launcher;
 mod png_io;
 mod run;
 
 use clap::{Parser, Subcommand};
-use pixelflow_capture::SourceKind;
 use pixelflow_core::{AlgorithmConfig, AlgorithmDescriptor, Processor};
 use pixelflow_gpu::NearestGpuAlgorithm;
 use pixelflow_processing::{AlgorithmRegistry, ConfigValue};
@@ -38,17 +37,14 @@ enum Command {
         #[arg(long, default_value = "contour")]
         algorithm: String,
     },
-    /// Launch an application, capture its window, upscale each frame,
-    /// and present the result.
+    /// Launch an application, intercept its presented frames,
+    /// upscale each frame, and present the result.
     Run {
         /// Program to launch.
         program: String,
         /// Arguments for the program.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// What to capture: window or monitor.
-        #[arg(long, value_parser = ["window", "monitor"], default_value = "window")]
-        capture: String,
         /// Integer scale factor (2 or 4).
         #[arg(long, default_value_t = 4)]
         scale: u32,
@@ -166,7 +162,7 @@ fn scales_display(descriptor: &AlgorithmDescriptor) -> String {
 
 fn run_backends() {
     println!("capture backends:");
-    println!("  wayland  XDG Desktop Portal ScreenCast + PipeWire (window or monitor)");
+    println!("  intercept  graphics API interception (LD_PRELOAD shim on the target's swap calls)");
     println!("presentation backends:");
     println!("  wgpu     fullscreen borderless window, aspect-ratio preserving, vsync");
     println!("processing algorithms:");
@@ -192,7 +188,7 @@ fn run_info() {
         Err(_) => println!("cpus: unknown"),
     }
     println!("display: probed when the presentation window opens");
-    println!("capture: wayland (XDG Desktop Portal ScreenCast + PipeWire)");
+    println!("capture: graphics interception (LD_PRELOAD shim on the target's swap calls)");
     println!("processing algorithms: {}", registry().ids().join(", "));
 }
 
@@ -291,25 +287,17 @@ fn main() -> ExitCode {
         Command::Run {
             program,
             args,
-            capture,
             scale,
             algorithm,
             windowed,
             ..
-        } => {
-            let source = match capture.as_str() {
-                "monitor" => SourceKind::Monitor,
-                _ => SourceKind::Window,
-            };
-            run::run(run::RunOptions {
-                program: program.clone(),
-                args: args.clone(),
-                source,
-                scale: *scale,
-                algorithm: algorithm.clone(),
-                windowed: *windowed,
-            })
-        }
+        } => run::run(run::RunOptions {
+            program: program.clone(),
+            args: args.clone(),
+            scale: *scale,
+            algorithm: algorithm.clone(),
+            windowed: *windowed,
+        }),
         Command::Backends => {
             run_backends();
             Ok(())
@@ -335,28 +323,17 @@ mod tests {
 
     /// The run command's fields, or empty values when the parsed
     /// command is not `run`, so a wrong variant fails the asserts.
-    fn run_fields(cli: Cli) -> (String, Vec<String>, String, u32, String, bool, bool) {
+    fn run_fields(cli: Cli) -> (String, Vec<String>, u32, String, bool, bool) {
         match cli.command {
             Command::Run {
                 program,
                 args,
-                capture,
                 scale,
                 algorithm,
                 windowed,
                 fullscreen,
-            } => (
-                program, args, capture, scale, algorithm, windowed, fullscreen,
-            ),
-            _ => (
-                String::new(),
-                vec![],
-                String::new(),
-                0,
-                String::new(),
-                false,
-                false,
-            ),
+            } => (program, args, scale, algorithm, windowed, fullscreen),
+            _ => (String::new(), vec![], 0, String::new(), false, false),
         }
     }
 
@@ -366,16 +343,13 @@ mod tests {
             "pixelflow",
             "run",
             "gtk-slashem",
-            "--capture",
-            "monitor",
             "--scale",
             "2",
             "--windowed",
         ])?;
-        let (program, args, capture, scale, algorithm, windowed, fullscreen) = run_fields(cli);
+        let (program, args, scale, algorithm, windowed, fullscreen) = run_fields(cli);
         assert_eq!(program, "gtk-slashem");
         assert!(args.is_empty());
-        assert_eq!(capture, "monitor");
         assert_eq!(scale, 2);
         assert_eq!(algorithm, "contour");
         assert!(windowed);
@@ -386,7 +360,7 @@ mod tests {
     #[test]
     fn run_passes_trailing_args_to_the_target() -> Result<(), clap::Error> {
         let cli = Cli::try_parse_from(["pixelflow", "run", "zsnes", "--", "-s", "game.smc"])?;
-        let (program, args, _, _, _, _, _) = run_fields(cli);
+        let (program, args, _, _, _, _) = run_fields(cli);
         assert_eq!(program, "zsnes");
         assert_eq!(args, vec!["-s".to_string(), "game.smc".to_string()]);
         Ok(())
@@ -399,10 +373,9 @@ mod tests {
     }
 
     #[test]
-    fn run_defaults_to_window_capture_at_4x() -> Result<(), clap::Error> {
+    fn run_defaults_to_4x() -> Result<(), clap::Error> {
         let cli = Cli::try_parse_from(["pixelflow", "run", "x"])?;
-        let (_, _, capture, scale, algorithm, windowed, _) = run_fields(cli);
-        assert_eq!(capture, "window");
+        let (_, _, scale, algorithm, windowed, _) = run_fields(cli);
         assert_eq!(scale, 4);
         assert_eq!(algorithm, "contour");
         assert!(!windowed);
@@ -412,7 +385,7 @@ mod tests {
     #[test]
     fn run_accepts_algorithm_flag() -> Result<(), clap::Error> {
         let cli = Cli::try_parse_from(["pixelflow", "run", "x", "--algorithm", "bilinear"])?;
-        let (_, _, _, _, algorithm, _, _) = run_fields(cli);
+        let (_, _, _, algorithm, _, _) = run_fields(cli);
         assert_eq!(algorithm, "bilinear");
         Ok(())
     }

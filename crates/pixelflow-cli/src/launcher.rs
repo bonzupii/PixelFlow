@@ -12,14 +12,35 @@ pub struct Launcher {
 impl Launcher {
     /// Spawn the target with its arguments. The child is a plain
     /// process: no environment changes, no wrapping, no injection.
+    /// Kept for targets run without interception.
     ///
     /// # Errors
     ///
     /// Returns the spawn error when the program cannot start.
+    #[cfg(test)]
     pub fn spawn(program: &str, args: &[String]) -> Result<Launcher, String> {
-        let child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
+        Launcher::spawn_with_env(program, args, &[])
+    }
+
+    /// Spawn the target with extra environment variables set on the
+    /// child. The interception path uses this to preload the shim
+    /// and name its socket: the child is otherwise unmodified, and
+    /// the shim does the intercepting from inside the child.
+    ///
+    /// # Errors
+    ///
+    /// Returns the spawn error when the program cannot start.
+    pub fn spawn_with_env(
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<Launcher, String> {
+        let mut command = Command::new(program);
+        command.args(args).stdin(Stdio::null());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command
             .spawn()
             .map_err(|e| format!("failed to launch {program}: {e}"))?;
         Ok(Launcher { child })
@@ -67,6 +88,22 @@ mod tests {
         let mut launcher = Launcher::spawn("/bin/true", &[])?;
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(launcher.exited(), "/bin/true has exited");
+        assert!(launcher.kill().is_ok(), "killing an exited child succeeds");
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_with_env_reaches_the_child() -> Result<(), String> {
+        let mut launcher = Launcher::spawn_with_env(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "test \"$PIXELFLOW_TEST_VAR\" = sent".to_string(),
+            ],
+            &[("PIXELFLOW_TEST_VAR".to_string(), "sent".to_string())],
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(launcher.exited(), "the shell child has exited");
         assert!(launcher.kill().is_ok(), "killing an exited child succeeds");
         Ok(())
     }

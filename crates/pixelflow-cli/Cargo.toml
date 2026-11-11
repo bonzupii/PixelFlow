@@ -17,7 +17,7 @@ pixelflow-core = { workspace = true }
 pixelflow-processing = { workspace = true }
 pixelflow-gpu = { workspace = true }
 pixelflow-capture = { workspace = true }
-pixelflow-wayland = { workspace = true }
+pixelflow-intercept = { workspace = true }
 pixelflow-present = { workspace = true }
 clap = { workspace = true }
 png = { workspace = true }

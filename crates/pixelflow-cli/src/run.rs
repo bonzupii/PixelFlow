@@ -1,6 +1,6 @@
-//! The `run` command: launch the target, capture its window, run
-//! each frame through the processing graph, and present the result
-//! in a fullscreen window.
+//! The `run` command: launch the target, intercept its presented
+//! frames, run each frame through the processing graph, and present
+//! the result in a fullscreen window.
 //!
 //! The work splits across two threads. The processing thread owns the
 //! capture backend, the child process, and the processing graphs: it
@@ -20,32 +20,36 @@
 //! thread stops capture and kills the child, and the presentation
 //! window closes.
 //!
-//! The target is launched first, then PixelFlow waits briefly for it
-//! to start before opening the portal session. The wait is startup
-//! grace, not detection: nothing verifies that the source the user
-//! picks in the compositor dialog belongs to the launched process,
-//! and there is no window list to poll.
+//! The target is launched with the interception shim preloaded, so
+//! its swap calls stream frames to the capture backend instead of
+//! presenting to the target's own window. There is no portal session
+//! and no source selection: interception happens at the program's
+//! own rendering boundary, and the program's own presentation is
+//! replaced, not recorded.
 
 use crate::launcher::Launcher;
-use pixelflow_capture::{CaptureBackend, CaptureConfig, CaptureError, SourceKind};
+use pixelflow_capture::{CaptureBackend, CaptureConfig};
 use pixelflow_core::{
     AlgorithmConfig, DirtySet, ExecutionBackend, Frame, FrameSlot, Graph, GraphBuilder, GraphError,
     Source, TileGrid, TileRouting,
 };
 use pixelflow_gpu::{GpuCapability, GpuContext, backend_for, gpu_capability};
+use pixelflow_intercept::InterceptCapture;
 use pixelflow_present::{PresentLoop, PresentUserEvent};
 use pixelflow_processing::region_analysis::{
     ContentClass, RegionAnalyzer, RegionMap, Route, RoutingProfile,
     resolve_algorithm as resolve_class_algorithm,
 };
-use pixelflow_wayland::WaylandCapture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// How long to wait for the target to start before opening the
-/// portal session. Startup grace, not detection.
-const WINDOW_GRACE: Duration = Duration::from_secs(2);
+/// How long to wait, after launching, for the target either to
+/// deliver its first intercepted frame or to exit. A target that
+/// exits before delivering a frame never started; a target that is
+/// still running after the wait may simply be slow to its first
+/// swap, and the processing loop keeps waiting for it.
+const STARTUP_WAIT: Duration = Duration::from_secs(2);
 
 /// Options for one `run` invocation.
 pub struct RunOptions {
@@ -53,8 +57,6 @@ pub struct RunOptions {
     pub program: String,
     /// Arguments for the program.
     pub args: Vec<String>,
-    /// Window or monitor capture.
-    pub source: SourceKind,
     /// Integer scale factor, 2 or 4.
     pub scale: u32,
     /// Processing algorithm id, from the registry.
@@ -72,54 +74,6 @@ fn best_effort<T, E>(step: Result<T, E>) {
     match step {
         Ok(_) => {}
         Err(_) => {}
-    }
-}
-
-/// Open capture for the requested source, falling back to monitor
-/// when window capture fails because the source is unavailable.
-/// Window is the default; monitor is the fallback when window
-/// capture is unavailable, per the `CaptureConfig` contract. A
-/// cancelled window selection is terminal for the run: the picker
-/// was dismissed or the backend cancelled the request, so falling
-/// back to monitor would capture the whole screen when the
-/// selection was refused, and mask the failure. Any other window
-/// initialize failure triggers the one monitor attempt. The monitor
-/// attempt opens a fresh portal session on the same backend: a
-/// failed initialize leaves the backend uninitialized, so the
-/// second call starts a new session instead of reusing the failed
-/// one. Exactly one additional attempt, no retry loop.
-///
-/// # Errors
-///
-/// Returns the combined failure when the requested source and, for
-/// a window request, the monitor fallback both fail to initialize,
-/// and the cancellation itself when window selection was cancelled.
-fn initialize_capture(
-    backend: &mut impl CaptureBackend,
-    requested: SourceKind,
-) -> Result<SourceKind, String> {
-    match backend.initialize(&CaptureConfig::new(requested)) {
-        Ok(()) => Ok(requested),
-        Err(error) => {
-            if requested != SourceKind::Window {
-                return Err(format!("capture failed to start: {error}"));
-            }
-            if matches!(error, CaptureError::SelectionCancelled(_)) {
-                return Err(format!("{error}; no monitor fallback attempted"));
-            }
-            eprintln!(
-                "pixelflow: window capture failed to start: {error}; attempting monitor capture as fallback"
-            );
-            match backend.initialize(&CaptureConfig::new(SourceKind::Monitor)) {
-                Ok(()) => {
-                    eprintln!("pixelflow: monitor capture started after window capture failed");
-                    Ok(SourceKind::Monitor)
-                }
-                Err(monitor_error) => Err(format!(
-                    "capture failed to start: window capture failed: {error}; monitor fallback also failed: {monitor_error}"
-                )),
-            }
-        }
     }
 }
 
@@ -164,15 +118,15 @@ fn adapter_present() -> bool {
     }
 }
 
-/// Launch the target, capture its window, process frames, and present
-/// them until the window closes or the target exits.
+/// Launch the target, intercept its presented frames, process
+/// frames, and present them until the window closes or the target
+/// exits.
 ///
 /// # Errors
 ///
 /// Returns a message when the algorithm is unknown, the scale is
-/// not supported, the target cannot launch, the portal session
-/// cannot open, capture fails, or the presentation window cannot
-/// start.
+/// not supported, the target cannot launch, interception fails to
+/// start, capture fails, or the presentation window cannot start.
 pub fn run(opts: RunOptions) -> Result<(), String> {
     let registry = crate::registry();
     let descriptor = registry
@@ -195,22 +149,43 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
         .copied()
         .unwrap_or(ExecutionBackend::Cpu);
     eprintln!("pixelflow: algorithm {algorithm} on {backend} backend");
-    let mut launcher = Launcher::spawn(&opts.program, &opts.args)?;
-    std::thread::sleep(WINDOW_GRACE);
-    if launcher.exited() {
-        return Err(format!("{} exited before capture started", opts.program));
-    }
-    let mut backend = WaylandCapture::new();
-    let effective_source = match initialize_capture(&mut backend, opts.source) {
-        Ok(source) => source,
+    // Bind the interception listener first, then launch the target
+    // with the shim preloaded: the shim connects on the target's
+    // first swap, so the listener must exist before the target can
+    // produce a frame. The reader starts before the startup wait,
+    // so no early frame is lost while waiting.
+    let mut backend = InterceptCapture::new().map_err(|e| e.to_string())?;
+    let env = backend.environment();
+    let mut launcher = match Launcher::spawn_with_env(&opts.program, &opts.args, &env) {
+        Ok(launcher) => launcher,
         Err(e) => {
-            // The child is already gone or cannot be killed; the capture
-            // error below is the one to report.
-            best_effort(launcher.kill());
+            best_effort(backend.shutdown());
             return Err(e);
         }
     };
-    eprintln!("pixelflow: capturing {effective_source}");
+    // Interception ignores the source kind: there is no window or
+    // monitor to select. The default config only satisfies the
+    // trait's signature.
+    if let Err(e) = backend.initialize(&CaptureConfig::default()) {
+        best_effort(launcher.kill());
+        return Err(format!("capture failed to start: {e}"));
+    }
+    // Wait for the first intercepted frame, or for the target to
+    // exit without producing one. A target that is still running
+    // after the wait may be slow to its first swap; the processing
+    // loop keeps waiting for it.
+    let deadline = std::time::Instant::now() + STARTUP_WAIT;
+    while std::time::Instant::now() < deadline {
+        if backend.frames_received() > 0 {
+            break;
+        }
+        if launcher.exited() {
+            best_effort(backend.shutdown());
+            return Err(format!("{} exited before capture started", opts.program));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("pixelflow: intercepting {}", opts.program);
     let slot = Arc::new(FrameSlot::new());
     let exit = Arc::new(AtomicBool::new(false));
     let processing_exit = exit.clone();
@@ -628,7 +603,10 @@ fn process_frame_routed(
 /// `wake` reports whether the loop is still alive: it sends the
 /// frame-ready user event through the loop's proxy, and returns
 /// false once the loop has closed. Ends when the exit flag is set,
-/// the target exits, the loop closes, or capture fails.
+/// the target exits, the loop closes, or capture fails. On ending
+/// it wakes the loop once more, so the loop leaves
+/// `ControlFlow::Wait`, re-checks the exit flag, and closes
+/// instead of sleeping forever with no frames left to wake it.
 fn run_processing(
     backend: &mut impl CaptureBackend,
     launcher: &mut Launcher,
@@ -675,6 +653,14 @@ fn run_processing(
         }
     }
     exit.store(true, Ordering::Relaxed);
+    // Wake the presentation loop one last time. It sleeps on
+    // `ControlFlow::Wait` and only re-checks the exit flag in
+    // `about_to_wait`, so without this event a target exit leaves
+    // the window open and the process alive forever: no more
+    // frames arrive to wake it after this point. A loop that
+    // already closed drops the event, so the wake is harmless
+    // when the window closed first.
+    wake();
     let seen = backend.frames_seen();
     let dropped_capture = backend.frames_dropped();
     match backend.shutdown() {
@@ -704,6 +690,7 @@ fn run_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pixelflow_capture::CaptureError;
     use pixelflow_core::{PixelFormat, Processor};
     use pixelflow_processing::Contour;
     use pixelflow_processing::region_analysis::ContentClass;
@@ -859,7 +846,6 @@ mod tests {
         let result = run(RunOptions {
             program: "pixelflow-definitely-not-a-program".to_string(),
             args: vec![],
-            source: SourceKind::Window,
             scale: 3,
             algorithm: "contour".to_string(),
             windowed: true,
@@ -876,7 +862,6 @@ mod tests {
         let result = run(RunOptions {
             program: "pixelflow-definitely-not-a-program".to_string(),
             args: vec![],
-            source: SourceKind::Window,
             scale: 4,
             algorithm: "nope".to_string(),
             windowed: true,
@@ -893,7 +878,6 @@ mod tests {
         let result = run(RunOptions {
             program: "/bin/true".to_string(),
             args: vec![],
-            source: SourceKind::Window,
             scale: 4,
             algorithm: "contour".to_string(),
             windowed: true,
@@ -905,72 +889,8 @@ mod tests {
         );
     }
 
-    /// A capture backend that succeeds only for the listed sources,
-    /// recording every initialize call, for the fallback tests.
-    /// `failures` names the exact error one source fails with, so
-    /// the fallback rule is tested per failure kind, not per
-    /// message: a cancelled selection and an unavailable source
-    /// take different paths through `initialize_capture`.
-    struct StubBackend {
-        succeeds: Vec<SourceKind>,
-        failures: Vec<(SourceKind, CaptureError)>,
-        attempts: Vec<SourceKind>,
-    }
-
-    impl StubBackend {
-        fn new(succeeds: Vec<SourceKind>) -> StubBackend {
-            StubBackend {
-                succeeds,
-                failures: Vec::new(),
-                attempts: Vec::new(),
-            }
-        }
-
-        fn failing(
-            source: SourceKind,
-            error: CaptureError,
-            succeeds: Vec<SourceKind>,
-        ) -> StubBackend {
-            StubBackend {
-                succeeds,
-                failures: vec![(source, error)],
-                attempts: Vec::new(),
-            }
-        }
-    }
-
-    impl CaptureBackend for StubBackend {
-        fn initialize(&mut self, config: &CaptureConfig) -> Result<(), CaptureError> {
-            self.attempts.push(config.source);
-            if let Some((_, error)) = self
-                .failures
-                .iter()
-                .find(|(source, _)| *source == config.source)
-            {
-                return Err(error.clone());
-            }
-            if self.succeeds.contains(&config.source) {
-                Ok(())
-            } else {
-                Err(CaptureError::SessionFailed(format!(
-                    "{} capture unavailable in the stub",
-                    config.source
-                )))
-            }
-        }
-
-        fn capture_frame(&mut self) -> Result<Option<Frame>, CaptureError> {
-            Ok(None)
-        }
-
-        fn shutdown(&mut self) -> Result<(), CaptureError> {
-            Ok(())
-        }
-    }
-
     /// A capture backend that yields queued frames, then
-    /// nothing, for the processing-thread tests: the synthetic
-    /// frame source that stands in for the `PipeWire` stream.
+    /// nothing, for the processing-thread tests.
     struct FrameFeedBackend {
         queued: std::collections::VecDeque<Result<Option<Frame>, CaptureError>>,
         seen: u64,
@@ -1103,136 +1023,151 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let slot = Arc::new(FrameSlot::new());
         let exit = Arc::new(AtomicBool::new(false));
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wakes_in_worker = wakes.clone();
         let result = run_processing(
             &mut backend,
             &mut launcher,
             "nearest",
             2,
             slot,
-            || true,
+            move || {
+                wakes_in_worker.fetch_add(1, Ordering::Relaxed);
+                true
+            },
             exit,
         );
         assert!(
             result.is_ok(),
             "an exited target ends processing cleanly: {result:?}"
         );
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "one final wake after the target exits, so the presentation loop leaves its wait and sees the exit flag; no frames were published"
+        );
         Ok(())
     }
 
+    /// A real GLX program's intercepted frames flow through the
+    /// processing thread into the presentation slot. The target is
+    /// `glx_target`, a real program rendering through Mesa under a
+    /// virtual X server; the frames it presents are intercepted by
+    /// the shim, processed by the nearest graph at 2x, and published
+    /// to the slot. The presentation window itself is not exercised
+    /// here: this VM has no GPU adapter, so the window cannot open.
     #[test]
-    fn window_success_needs_no_fallback() {
-        let mut backend = StubBackend::new(vec![SourceKind::Window]);
-        let result = initialize_capture(&mut backend, SourceKind::Window);
-        assert_eq!(result, Ok(SourceKind::Window));
-        assert_eq!(backend.attempts, vec![SourceKind::Window]);
-    }
-
-    #[test]
-    fn window_failure_falls_back_to_monitor() {
-        let mut backend = StubBackend::new(vec![SourceKind::Monitor]);
-        let result = initialize_capture(&mut backend, SourceKind::Window);
-        assert_eq!(result, Ok(SourceKind::Monitor));
-        assert_eq!(
-            backend.attempts,
-            vec![SourceKind::Window, SourceKind::Monitor],
-            "the fallback attempts monitor on the same backend after window fails"
-        );
-    }
-
-    #[test]
-    fn window_selection_cancelled_is_terminal() {
-        let mut backend = StubBackend::failing(
-            SourceKind::Window,
-            CaptureError::SelectionCancelled(
-                "select sources response: Cancelled; the source picker dialog was dismissed, or the compositor backend cancelled the request"
-                    .to_string(),
-            ),
-            vec![],
-        );
-        let result = initialize_capture(&mut backend, SourceKind::Window);
-        assert!(result.is_err(), "a cancelled selection ends the run");
-        if let Err(error) = result {
-            assert!(
-                error.contains("selection cancelled"),
-                "the error names the cancellation: {error}"
-            );
-            assert!(
-                error.contains("no monitor fallback attempted"),
-                "the error names the missing fallback: {error}"
-            );
-            assert!(
-                !error.contains("monitor fallback also failed"),
-                "no monitor attempt ran: {error}"
-            );
+    fn intercepted_frames_flow_through_processing() -> Result<(), String> {
+        use std::process::{Command, Stdio};
+        // A fresh virtual X server for this test alone.
+        let display = "81";
+        let mut xvfb = Command::new("Xvfb")
+            .args([":81", "-screen", "0", "1024x768x24"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Xvfb must start for the interception test: {e}"))?;
+        let socket = std::path::PathBuf::from("/tmp/.X11-unix/X81");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !socket.exists() {
+            if std::time::Instant::now() > deadline {
+                let _ = xvfb.kill();
+                return Err("Xvfb on :81 did not create its socket in time".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(
-            backend.attempts,
-            vec![SourceKind::Window],
-            "no monitor attempt after a cancelled selection"
-        );
+        let result = intercepted_frames_flow_through_processing_inner(display);
+        let _ = xvfb.kill();
+        let _ = xvfb.wait();
+        result
     }
 
-    #[test]
-    fn window_unavailable_still_falls_back_to_monitor() {
-        let mut backend = StubBackend::failing(
-            SourceKind::Window,
-            CaptureError::SourceUnavailable {
-                requested: SourceKind::Window,
-                available: vec![SourceKind::Monitor],
-            },
-            vec![SourceKind::Monitor],
-        );
-        let result = initialize_capture(&mut backend, SourceKind::Window);
-        assert_eq!(result, Ok(SourceKind::Monitor));
-        assert_eq!(
-            backend.attempts,
-            vec![SourceKind::Window, SourceKind::Monitor],
-            "an unavailable window still falls back to monitor"
-        );
-    }
-
-    #[test]
-    fn both_failures_are_named_in_the_error() {
-        let mut backend = StubBackend::new(vec![]);
-        let result = initialize_capture(&mut backend, SourceKind::Window);
-        assert!(result.is_err(), "expected both attempts to fail");
-        if let Err(error) = result {
-            assert!(
-                error.contains("window capture failed"),
-                "the error names the window failure: {error}"
-            );
-            assert!(
-                error.contains("monitor fallback also failed"),
-                "the error names the monitor failure: {error}"
-            );
-            assert!(
-                error.contains("window capture unavailable"),
-                "the error carries the window failure itself: {error}"
-            );
-            assert!(
-                error.contains("monitor capture unavailable"),
-                "the error carries the monitor failure itself: {error}"
-            );
+    /// The body of [`intercepted_frames_flow_through_processing`],
+    /// split out so the Xvfb guard above always kills the server.
+    fn intercepted_frames_flow_through_processing_inner(display: &str) -> Result<(), String> {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!(
+            "pixelflow-run-intercept-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let target = dir.join("glx_target");
+        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../pixelflow-intercept/tests/glx_target.c");
+        let status = Command::new("cc")
+            .args(["-O2"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&target)
+            .args(["-lX11", "-l:libGL.so.1"])
+            .status()
+            .map_err(|e| format!("the C compiler must run: {e}"))?;
+        if !status.success() {
+            return Err("glx_target must compile".to_string());
         }
-        assert_eq!(
-            backend.attempts,
-            vec![SourceKind::Window, SourceKind::Monitor],
-            "exactly one additional attempt, no retry loop"
-        );
-    }
-
-    #[test]
-    fn monitor_request_does_not_fall_back() {
-        let mut backend = StubBackend::new(vec![]);
-        let result = initialize_capture(&mut backend, SourceKind::Monitor);
-        assert!(result.is_err(), "expected the monitor attempt to fail");
-        if let Err(error) = result {
-            assert!(
-                !error.contains("fallback"),
-                "a monitor request has no fallback to attempt: {error}"
-            );
+        let mut backend = InterceptCapture::new()
+            .map_err(|e| format!("the interception backend must bind: {e}"))?;
+        let mut env: Vec<(String, String)> = backend.environment().to_vec();
+        env.push(("DISPLAY".to_string(), format!(":{display}")));
+        let mut launcher = Launcher::spawn_with_env(
+            target.to_str().ok_or("the target path must be UTF-8")?,
+            &[],
+            &env,
+        )?;
+        backend
+            .initialize(&CaptureConfig::default())
+            .map_err(|e| format!("the interception backend must start: {e}"))?;
+        let slot = Arc::new(FrameSlot::new());
+        let exit = Arc::new(AtomicBool::new(false));
+        let slot_in_worker = slot.clone();
+        let exit_in_worker = exit.clone();
+        let worker = std::thread::spawn(move || {
+            run_processing(
+                &mut backend,
+                &mut launcher,
+                "nearest",
+                2,
+                slot_in_worker,
+                || true,
+                exit_in_worker,
+            )
+        });
+        // The newest published frame is the processed output: 640x480
+        // at 2x, with the target's yellow rectangle scaled with it.
+        // The rectangle sat at frame x 80..240, y 300..420 after the
+        // 2x nearest upscale of the 320x240 source.
+        let mut published: Option<Frame> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            if let Some(frame) = slot.take() {
+                published = Some(frame);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(backend.attempts, vec![SourceKind::Monitor]);
+        exit.store(true, Ordering::Relaxed);
+        let worker_result = worker
+            .join()
+            .map_err(|_| "the processing thread panicked".to_string())?;
+        let frame = published.ok_or("expected a processed frame in the slot")?;
+        assert_eq!((frame.width(), frame.height()), (640, 480));
+        let rect_row = frame.row(360);
+        let rect = [
+            rect_row[160 * 3],
+            rect_row[160 * 3 + 1],
+            rect_row[160 * 3 + 2],
+        ];
+        assert_eq!(
+            rect,
+            [255, 255, 0],
+            "the rectangle pixel is yellow after upscale"
+        );
+        assert!(
+            worker_result.is_ok(),
+            "processing ends cleanly: {worker_result:?}"
+        );
+        Ok(())
     }
 
     #[test]

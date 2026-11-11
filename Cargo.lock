@@ -1686,9 +1686,9 @@ dependencies = [
  "pixelflow-capture",
  "pixelflow-core",
  "pixelflow-gpu",
+ "pixelflow-intercept",
  "pixelflow-present",
  "pixelflow-processing",
- "pixelflow-wayland",
  "png",
 ]
 
@@ -1705,6 +1705,14 @@ dependencies = [
  "pixelflow-processing",
  "pollster",
  "wgpu",
+]
+
+[[package]]
+name = "pixelflow-intercept"
+version = "0.1.0"
+dependencies = [
+ "pixelflow-capture",
+ "pixelflow-core",
 ]
 
 [[package]]
