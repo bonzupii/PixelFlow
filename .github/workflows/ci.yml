@@ -63,12 +63,26 @@ jobs:
           #   unconditionally in their build scripts, and bindgen needs libclang
           # pkg-config: the pkg-config binary used by the system_deps and
           #   pkg_config build-script probes
+          # libx11-dev: the interception tests compile glx_target.c and
+          #   x11_target.c with the system C compiler; both include
+          #   X11/Xlib.h and X11/Xutil.h
+          # libxext-dev: x11_target.c includes X11/extensions/XShm.h
+          # libgl1-mesa-dev: GL development headers and the libGL.so link
+          #   for the interception tests' GLX target, which links libGL
+          # libsdl1.2-dev: the interception tests compile sdl_soft_target.c,
+          #   which includes SDL/SDL.h, and run sdl-config for its flags
+          # xvfb: the interception tests launch Xvfb to run the targets
           sudo apt-get install -y \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
             libwayland-dev \
             libclang-dev \
-            pkg-config
+            pkg-config \
+            libx11-dev \
+            libxext-dev \
+            libgl1-mesa-dev \
+            libsdl1.2-dev \
+            xvfb
       # No PIXELFLOW_FIXTURES_DIR is set here on purpose: the regression
       # tests compare against copyrighted game screenshots that are never
       # committed, so they skip without fixtures. That is the expected CI
