@@ -40,7 +40,7 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `be90b10`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `105054c`
 (2026-11-11). Eight crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
@@ -1036,7 +1036,25 @@ In execution order (§11 of the owner directive):
    gate fails on the unmodified base (libpipewire-0.3-dev wiped,
    libspa-sys build fails), so no port landed, nothing was pushed,
    and the worktree was removed. Resume after the libraries are
-   restored. Study done: reference `st_eagle`
+   restored. Update 2026-11-11 05:25 driver run: the base gate was
+   re-measured at `105054c` before a mid-run VM restart. `cargo fmt
+   --check` passes, `cargo build --release` passes (7m47s),
+   `ci/clippy-gate.sh` passes (30 known, 0 elsewhere), release suite
+   partial 109 passed / 1 failed: the 32-bit intercept test fails
+   linking the 32-bit `x11_target` (`-lX11` and `-lXext` not found;
+   no 32-bit libX11 or libXext in this VM instance, no
+   `/usr/lib/i386-linux-gnu`, no `/usr/lib32`, no `qemu-i386`). The
+   VM restarted about 11:37 UTC, mid-run, wiping libpipewire-0.3-dev
+   and libspa-0.2 again, so a suite re-run now fails at the
+   libspa-sys build script. The eagle port was not attempted this
+   run: the base gate fails on the unmodified base, so no port worker
+   was spawned and no port code was written. Resume only after the
+   base gate passes on the unmodified base. Logs:
+   `goals/pixelflow/hidden_files/driver-20261111-0525-build-release.log`,
+   `driver-20261111-0525-clippy-gate.log`,
+   `driver-20261111-0525-suite-release.log`,
+   `driver-20261111-0525-suite-release-nofailfast.log`.
+   Study done: reference `st_eagle`
    (`pixelflow_scalers.rs:746`), native factor 2, registry entry
    `Eagle`, port as id `eagle`, scales 2 and 4 (two 2x passes at
    4x). Base-gate logs:
