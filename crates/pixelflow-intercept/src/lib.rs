@@ -1,11 +1,14 @@
 //! Graphics interception capture.
 //!
 //! The wrapped program is launched with an `LD_PRELOAD` shim (see
-//! `shim/intercept.c`) that interposes its swap calls: instead of
-//! presenting a frame to its own window, the program's frame is read
-//! back and streamed to `PixelFlow` over a `Unix` socket. This backend
-//! owns the listening end of that socket and turns the streamed
-//! frames into [`Frame`] values for the processing thread.
+//! `shim/intercept.c`) that interposes the calls the program makes
+//! to present a frame: its swap calls for GL programs, its X11
+//! image puts for software-rendered programs. Instead of
+//! presenting a frame to its own window, the program's frame is
+//! read back or converted and streamed to `PixelFlow` over a
+//! `Unix` socket. This backend owns the listening end of that
+//! socket and turns the streamed frames into [`Frame`] values for
+//! the processing thread.
 //!
 //! The backend implements [`CaptureBackend`], so the CLI drives it
 //! exactly like any other capture source. It knows nothing about
@@ -17,14 +20,15 @@
 //! Wire protocol, per frame: 24 header bytes, then the payload.
 //! The header is the magic `PF01`, the width, height, and payload
 //! byte count as little-endian `u32`s, and the program's window id
-//! as a little-endian `u64` (the GLX drawable, or the opaque EGL
-//! surface handle). The payload is tightly packed RGB8, top row
-//! first. A frame whose header fails validation ends the stream with
-//! a sticky error: the reader thread stops and
-//! [`CaptureBackend::capture_frame`] reports that error. A clean
-//! stream end (the program exited and closed the socket) is not an
-//! error: the reader waits for a new connection, and the caller
-//! learns the program exited from the launcher instead.
+//! as a little-endian `u64` (the GLX drawable, the opaque EGL
+//! surface handle, or the X window id). The payload is tightly
+//! packed RGB8, top row first. A frame whose header fails
+//! validation ends the stream with a sticky error: the reader
+//! thread stops and [`CaptureBackend::capture_frame`] reports that
+//! error. A clean stream end (the program exited and closed the
+//! socket) is not an error: the reader waits for a new connection,
+//! and the caller learns the program exited from the launcher
+//! instead.
 
 use pixelflow_capture::{CaptureBackend, CaptureConfig, CaptureError};
 use pixelflow_core::{Frame, PixelFormat};
@@ -74,12 +78,76 @@ pub fn shim_path() -> &'static str {
     env!("PIXELFLOW_INTERCEPT_SHIM")
 }
 
+/// Path of the 32-bit interception shim, baked in at build time
+/// by `build.rs`; empty when the toolchain had no 32-bit support.
+#[must_use]
+pub fn shim32_path() -> &'static str {
+    env!("PIXELFLOW_INTERCEPT_SHIM32")
+}
+
+/// ELF class byte values, the fifth byte of an ELF header.
+const ELF_CLASS_32: u8 = 1;
+const ELF_CLASS_64: u8 = 2;
+
+/// The ELF class of the file at `path`: 1 for a 32-bit object, 2
+/// for a 64-bit object, `None` when the file is not an ELF object
+/// or cannot be read.
+fn elf_class(path: &std::path::Path) -> Option<u8> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0_u8; 5];
+    file.read_exact(&mut header).ok()?;
+    if !header.starts_with(b"\x7fELF") {
+        return None;
+    }
+    match header[4] {
+        ELF_CLASS_32 | ELF_CLASS_64 => Some(header[4]),
+        _ => None,
+    }
+}
+
+/// Resolve `program` to a path: the path as given when it names a
+/// file, else the first match on `PATH`.
+fn resolve_program(program: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(program);
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The program whose ELF class decides the shim: the program
+/// itself, unless it is a qemu-user emulator, in which case the
+/// first argument naming an existing file is the guest program the
+/// shim must match. The shim loads into the guest, not into qemu.
+fn effective_target(program: &str, args: &[String]) -> Option<PathBuf> {
+    let resolved = resolve_program(program)?;
+    let name = resolved.file_name()?.to_string_lossy();
+    if name.starts_with("qemu-") {
+        for arg in args {
+            let candidate = PathBuf::from(arg);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        return None;
+    }
+    Some(resolved)
+}
+
 /// A delivered frame with the window id the shim reported for it.
 struct DeliveredFrame {
     /// The frame pixels.
     frame: Frame,
-    /// The program's window id: the GLX drawable, or the opaque
-    /// EGL surface handle.
+    /// The program's window id: the GLX drawable, the opaque EGL
+    /// surface handle, or the X window id.
     window_id: u64,
 }
 
@@ -301,6 +369,9 @@ impl InterceptCapture {
 
     /// The environment the launcher sets on the wrapped program:
     /// the shim preloaded, and the socket it streams frames to.
+    /// This is the 64-bit shim, for targets the caller already
+    /// knows are 64-bit; [`InterceptCapture::environment_for`]
+    /// selects by the target's ELF class instead.
     #[must_use]
     pub fn environment(&self) -> [(String, String); 2] {
         [
@@ -310,6 +381,43 @@ impl InterceptCapture {
                 self.socket_path.to_string_lossy().into_owned(),
             ),
         ]
+    }
+
+    /// The environment the launcher sets on the wrapped program,
+    /// with the shim matching the target's ELF class: the 32-bit
+    /// shim for a 32-bit target, the 64-bit shim otherwise. A
+    /// program that cannot be resolved, or is not an ELF object,
+    /// gets the 64-bit shim.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the target is 32-bit and no 32-bit
+    /// shim was built: preloading the 64-bit shim into a 32-bit
+    /// process fails silently in the loader and captures zero
+    /// frames, so this is a loud failure instead.
+    pub fn environment_for(
+        &self,
+        program: &str,
+        args: &[String],
+    ) -> Result<[(String, String); 2], String> {
+        let shim = match effective_target(program, args).and_then(|target| elf_class(&target)) {
+            Some(ELF_CLASS_32) => {
+                if shim32_path().is_empty() {
+                    return Err(format!(
+                        "target {program} is 32-bit but no 32-bit interception shim was built (no 32-bit C toolchain)"
+                    ));
+                }
+                shim32_path().to_string()
+            }
+            _ => shim_path().to_string(),
+        };
+        Ok([
+            (PRELOAD_ENV.to_string(), shim),
+            (
+                SOCKET_ENV.to_string(),
+                self.socket_path.to_string_lossy().into_owned(),
+            ),
+        ])
     }
 
     /// The window id of the last frame received, or 0 when no frame
@@ -426,5 +534,76 @@ impl CaptureBackend for InterceptCapture {
 
     fn frames_dropped(&self) -> u64 {
         self.queue.dropped.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("pixelflow-intercept-test-{name}"));
+        let mut file = std::fs::File::create(&path).expect("test file is writable");
+        file.write_all(bytes).expect("test file is writable");
+        path
+    }
+
+    #[test]
+    fn elf_class_reads_both_classes() {
+        let path32 = write_temp("32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
+        let path64 = write_temp("64", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0]);
+        let path_text = write_temp("text", b"not an elf object");
+        assert_eq!(elf_class(&path32), Some(1));
+        assert_eq!(elf_class(&path64), Some(2));
+        assert_eq!(elf_class(&path_text), None);
+        assert_eq!(
+            elf_class(&PathBuf::from("/nonexistent/pixelflow-intercept-test")),
+            None
+        );
+        std::fs::remove_file(path32).ok();
+        std::fs::remove_file(path64).ok();
+        std::fs::remove_file(path_text).ok();
+    }
+
+    #[test]
+    fn effective_target_uses_the_qemu_guest() {
+        let qemu_path = std::env::temp_dir().join("qemu-i386-pixelflow-test");
+        std::fs::write(&qemu_path, b"fake emulator").expect("test file is writable");
+        let guest = write_temp("guest32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
+        let target = effective_target(
+            qemu_path.to_str().unwrap(),
+            &[guest.to_string_lossy().into_owned()],
+        );
+        assert_eq!(target, Some(guest.clone()));
+        // Without a guest argument there is no target to match.
+        let target = effective_target(qemu_path.to_str().unwrap(), &[]);
+        assert_eq!(target, None);
+        // A plain program resolves to itself.
+        let target = effective_target(guest.to_str().unwrap(), &[]);
+        assert_eq!(target, Some(guest.clone()));
+        std::fs::remove_file(qemu_path).ok();
+        std::fs::remove_file(guest).ok();
+    }
+
+    #[test]
+    fn environment_for_selects_the_shim_by_elf_class() {
+        let mut backend = InterceptCapture::new().expect("socket binds");
+        let guest32 = write_temp("guest32b", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
+        let result = backend.environment_for(guest32.to_str().unwrap(), &[]);
+        if shim32_path().is_empty() {
+            assert!(result.is_err());
+        } else {
+            let env = result.expect("32-bit shim built");
+            assert_eq!(env[0].1, shim32_path());
+        }
+        let guest64 = write_temp("guest64b", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0]);
+        let env = backend
+            .environment_for(guest64.to_str().unwrap(), &[])
+            .expect("64-bit target");
+        assert_eq!(env[0].1, shim_path());
+        std::fs::remove_file(guest32).ok();
+        std::fs::remove_file(guest64).ok();
+        backend.shutdown().ok();
     }
 }

@@ -151,11 +151,21 @@ pub fn run(opts: RunOptions) -> Result<(), String> {
     eprintln!("pixelflow: algorithm {algorithm} on {backend} backend");
     // Bind the interception listener first, then launch the target
     // with the shim preloaded: the shim connects on the target's
-    // first swap, so the listener must exist before the target can
-    // produce a frame. The reader starts before the startup wait,
-    // so no early frame is lost while waiting.
+    // first present call, so the listener must exist before the
+    // target can produce a frame. The reader starts before the
+    // startup wait, so no early frame is lost while waiting. The
+    // shim matches the target's ELF class: a 32-bit target with no
+    // 32-bit shim built fails here, loudly, instead of running
+    // with a shim the loader silently refuses and capturing zero
+    // frames.
     let mut backend = InterceptCapture::new().map_err(|e| e.to_string())?;
-    let env = backend.environment();
+    let env = match backend.environment_for(&opts.program, &opts.args) {
+        Ok(env) => env,
+        Err(e) => {
+            best_effort(backend.shutdown());
+            return Err(e);
+        }
+    };
     let mut launcher = match Launcher::spawn_with_env(&opts.program, &opts.args, &env) {
         Ok(launcher) => launcher,
         Err(e) => {

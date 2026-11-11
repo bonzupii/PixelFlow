@@ -55,7 +55,7 @@ one; on a machine with no adapter use `nearest`.
 ```
 
 `run` launches the target with an interception shim preloaded, so
-the target's swap calls stream its presented frames to PixelFlow
+the target's present calls stream its presented frames to PixelFlow
 instead of presenting to the target's own window. PixelFlow waits
 up to 2 seconds for the first intercepted frame, or for the target
 to exit without producing one. Press `f` to toggle between
@@ -70,10 +70,12 @@ adapter is an error, not a silent CPU run.
 
 - Capture runs on Linux by intercepting the target's graphics
   output: an `LD_PRELOAD` shim interposes the target's GLX and EGL
-  swap calls and streams its presented frames to PixelFlow. The
-  target must present through GLX or EGL. `upscale`, `backends`,
-  `info`, and `algorithms` need no display and work anywhere the
-  binary builds.
+  swap calls and its X11 image puts (`XPutImage`,
+  `XShmPutImage`) and streams its presented frames to PixelFlow.
+  The target must present through GLX, EGL, or X11 image puts.
+  32-bit targets use a 32-bit shim build, selected by the target's
+  ELF class. `upscale`, `backends`, `info`, and `algorithms` need
+  no display and work anywhere the binary builds.
 - Not implemented: Vulkan interception, input forwarding, DMA-BUF
   buffers (a DMA-BUF buffer is a typed error, not a silent
   fallback).
@@ -137,10 +139,13 @@ to fix silently; Contour output does not change until the owner decides.
   `docs/interception.md` for what was verified and what was not:
   real GLX target intercepted, processed, and presented
   fullscreen under labwc; target-exit shutdown fixed and
-  verified live; relaunch verified. The EGL swap path is
-  implemented but unverified here (no EGL library is installed
-  in this VM), Vulkan interception is not implemented, and input
-  forwarding is not implemented.
+  verified live; relaunch verified. The zsnes 0-frames failure
+  is fixed and verified live: a real SDL 1.2 software program
+  and a 32-bit X11 program under qemu-i386 both went from 0
+  frames to over 100 frames per run, presented fullscreen. The
+  EGL swap path is implemented but unverified here (no EGL
+  library is installed in this VM), Vulkan interception is not
+  implemented, and input forwarding is not implemented.
 - **GPU execution ran on a software adapter, not hardware.**
   The `nearest-gpu` node ran on llvmpipe (Mesa lavapipe) with
   exact CPU parity at 2x and 4x, and the live path used it under
