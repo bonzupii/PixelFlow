@@ -23,6 +23,7 @@ fn main() {
         return;
     }
     println!("cargo:rerun-if-changed=shim/intercept.c");
+    println!("cargo:rerun-if-env-changed=CC");
     let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let output = PathBuf::from(&out_dir).join("libpixelflow_intercept.so");
     let status = std::process::Command::new(&compiler)
@@ -61,7 +62,19 @@ fn main() {
                 output32.display()
             );
         }
-        _ => {
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "pixelflow-intercept: 32-bit probe failed ({compiler} -m32): {}",
+                detail.trim()
+            );
+            println!(
+                "cargo:warning=pixelflow-intercept: no 32-bit C toolchain; 32-bit targets cannot be intercepted"
+            );
+            println!("cargo:rustc-env=PIXELFLOW_INTERCEPT_SHIM32=");
+        }
+        Err(e) => {
+            eprintln!("pixelflow-intercept: 32-bit probe could not run {compiler}: {e}");
             println!(
                 "cargo:warning=pixelflow-intercept: no 32-bit C toolchain; 32-bit targets cannot be intercepted"
             );
