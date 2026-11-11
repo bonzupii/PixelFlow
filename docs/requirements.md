@@ -40,13 +40,13 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `91bf243`
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `951a0b2`
 (2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
 | `pixelflow-core` | `Frame` (private fields, stride-aware, timestamp/sequence), `PixelFormat` (Rgb8, Rgba8, Gray8), `Processor` trait, `Node` trait, `Graph`/`GraphBuilder`, incremental execution (16x16 tiles, dirty propagation, per-node tile caching) | Implemented |
-| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`, `Scale2x`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
+| `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`, `Scale2x`, `Epx`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
 | `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); wired into the live path and the algorithm registry at `aea977c` (`nearest-gpu` registered; live `run` resolves `nearest` to the GPU node when an adapter is present); device run unverified — no adapter on this VM |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
 | `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
@@ -633,6 +633,22 @@ Contour product algorithm; do not confuse the two.
   `cg-scale2x-verify3-build-release.log`,
   `cg-scale2x-verify3-clippy.log`,
   `cg-scale2x-verify3-suite-release.log`.
+  Baseline at `951a0b2` verified by the epx port run (release,
+  2026-11-10, `cargo build --release` exit 0, `cargo fmt --check`
+  exit 0, `ci/clippy-gate.sh` exit 0 with 30 known diagnostics
+  and 0 elsewhere, `cargo test --release --workspace` under
+  `dbus-run-session` with `PIXELFLOW_FIXTURES_DIR` set, exit 0):
+  306 passed / 0 failed. Oracle bit-identical per the
+  port run's own comparison
+  (`cg-epx-oracle.log`, reference outputs
+  regenerated from the verbatim reference file). Raw logs:
+  `goals/pixelflow/hidden_files/cg-epx-verify2-fmt.log`,
+  `cg-epx-verify2-build-release.log`,
+  `cg-epx-verify2-clippy.log`,
+  `cg-epx-verify2-suite-release.log`. A VM restart mid-task
+  wiped the `/usr` dev libraries; `libpipewire-0.3-dev` and
+  `libclang-dev` were reinstalled from Ubuntu Noble before the
+  suite re-run.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -800,6 +816,12 @@ a documented blocker.
   `scale2x`, scales 2/4, bit-identical oracle, flat shift 0,
   release suite 292 passed / 0 failed, gate verified
   independently by the coordinator run (see §8).
+- `951a0b2`, EPX: port the reference stage as a stage
+  algorithm (Scale2x plus the three-or-more-identical-
+  neighbours guard, native factor 2, 4x as two 2x passes),
+  id `epx`, scales 2/4, bit-identical oracle, flat shift 0,
+  release suite 306 passed / 0 failed, gate verified twice
+  including on the rebased branch (see §8).
 
 ## 12. Remaining work and acceptance criteria
 
@@ -816,7 +838,9 @@ In execution order (§11 of the owner directive):
    from the owner's suite log), at `e8b475f` (280, release,
    fixtures exercised, gate verified independently by the driver
    run), at `91bf243` (292, release, fixtures exercised, gate
-   verified independently by the coordinator run).
+   verified independently by the coordinator run), at `951a0b2`
+   (306, release, fixtures exercised, gate verified on the
+   rebased branch).
 2. Wayland verification report, done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
@@ -903,11 +927,20 @@ In execution order (§11 of the owner directive):
    the owner's suite log `cg-bicubic-suite-release.log`);
    lanczos3 ported at `e8b475f` (bit-identical oracle, release
    suite 280 passed / 0 failed); scale2x ported at `91bf243`
-   (bit-identical oracle, release suite 292 passed / 0 failed).
-   Nearest and bilinear are the repo's existing implementations,
-   not reference ports. Next in order: epx; the owner is porting
-   in sequence in `port/*` worktrees (`port/scale2x` exists), so
-   the driver spawns no port worker. The "queued behind the CI fix" line is superseded: the
+   (bit-identical oracle, release suite 292 passed / 0 failed);
+   epx ported at `951a0b2` (bit-identical oracle, release suite
+   306 passed / 0 failed). Nearest and bilinear are the
+   repo's existing implementations, not reference ports. Next in
+   order: eagle. Correction 2026-11-10: the sentence in the
+   5240df4 record saying the owner is porting in sequence in
+   `port/*` worktrees, so the driver spawns no port worker, was
+   false on the record. The owner ported only PixelFlow himself,
+   in the main tree (1f4ddc1, d2547b1); every reference port
+   after that (bicubic, lanczos3, scale2x, epx) was done by
+   coordinator and driver workers, and the port/scale2x worktree
+   was created by the coordinator's worker, not by the owner.
+   The coordinator and driver spawn port workers in order; they
+   do not stand down on ports. The "queued behind the CI fix" line is superseded: the
    ports landed on main with no separate CI-fix commit.
 10. Operation-level composition (owner direction, 2026-11-10;
     queued behind the scaler ports). This restores and extends
