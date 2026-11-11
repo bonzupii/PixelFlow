@@ -40,8 +40,8 @@ incompatibility explained.
 
 ## 2. Architecture and implementation status
 
-Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `951a0b2`
-(2026-11-10). Seven crates, Rust 1.99.1, edition 2024:
+Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `be90b10`
+(2026-11-11). Eight crates, Rust 1.99.1, edition 2024:
 
 | Crate | Contents | Status |
 | --- | --- | --- |
@@ -49,7 +49,8 @@ Repository: `bonzupii/PixelFlow`, branch `main`. HEAD `951a0b2`
 | `pixelflow-processing` | Algorithms `Contour`, `Nearest`, `Bilinear`, `PixelFlow`, `Bicubic`, `Lanczos3`, `Scale2x`, `Epx`; registry (`AlgorithmRegistry::builtin`); region analysis module (six classes, confidence scores) wired into the graph and the live run path | Implemented; framework integrated (`c6accd0`) |
 | `pixelflow-gpu` | `GpuContext` (adapter selection, discrete → integrated → virtual → CPU last), `GpuImage` (resident `Rgba8Uint` texture, measured upload/download), `GpuNearestNode` (WGSL nearest-neighbour compute node, scales 2/4, graph `Node`), `ExecutionBackend` / `GpuCapability` | Implemented and integrated (`c1c3a88`); `ExecutionBackend` unified on the core contract type (`3ba4f27`); wired into the live path and the algorithm registry at `aea977c` (`nearest-gpu` registered; live `run` resolves `nearest` to the GPU node when an adapter is present); device run unverified — no adapter on this VM |
 | `pixelflow-capture` | Capture backend abstraction (`SourceKind`: window/monitor) | Implemented |
-| `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; live acceptance unverified (see §7) |
+| `pixelflow-intercept` | `LD_PRELOAD` shim interposing GL/GLX/EGL swap calls and X11 image puts, 64-bit and 32-bit shims, ELF-class shim selection | Implemented (`96ab068`, `a11c5b6`); live verified under labwc (see §7 and `docs/interception.md`) |
+| `pixelflow-wayland` | Portal ScreenCast session, PipeWire frames, format conversion | Implemented; superseded as the live path (see §7), the portal code stays in the tree but `run` uses interception |
 | `pixelflow-present` | wgpu presentation window, aspect-ratio-preserving layout, frame slot with latest-frame-wins, event-loop wake-up via event proxy | Implemented; no GPU compute (display only) |
 | `pixelflow-cli` | `upscale` (PNG in/out), `run` (launch, capture, process, present), `backends`, `info`, `algorithms`, `bench` | Implemented; algorithm selection reads the registry (`--algorithm`, default `contour`) |
 
@@ -314,16 +315,19 @@ Contour product algorithm; do not confuse the two.
 
 ## 6. Capture and presentation requirements
 
-- Wayland capture is the immediate priority: XDG Desktop Portal
-  ScreenCast session → PipeWire frames. The implementation is the
-  standard portal flow, not compositor interception.
+- Wayland wrapping is the immediate priority: graphics API
+  interception of the target program (see §7 and
+  `docs/interception.md`). The XDG Desktop Portal ScreenCast
+  flow is the superseded 2026-11-09 Milestone 2 approach, not
+  the specified path.
 - Live pipeline reliability: launch coordination, portal session/source
   selection, PipeWire startup, format negotiation, cancellation/timeout/
   termination, stride/offset/format/buffer lifetime, frame delivery and
   backpressure (newest frame, no stale freeze), event-loop wakeups,
   presenter init errors producing a failing exit status, clean shutdown,
   fullscreen/aspect, honest source reporting (never claim the
-  portal-selected source belongs to the launched process).
+  portal-selected source belongs to the launched process). The
+  portal items in this list describe the superseded flow.
 - Presentation and upscaling preserve aspect ratio by default: uniform
   scaling (same factor on both axes), contain-fit to the canvas (scale
   = min(canvas_w/src_w, canvas_h/src_h)), black bars on the one axis
@@ -695,6 +699,22 @@ Contour product algorithm; do not confuse the two.
   wiped the `/usr` dev libraries; `libpipewire-0.3-dev` and
   `libclang-dev` were reinstalled from Ubuntu Noble before the
   suite re-run.
+  Baseline at `be90b10` verified in part by this driver run
+  (2026-11-11, `cargo fmt --check` exit 0,
+  `ci/clippy-gate.sh` exit 0 with 30 known diagnostics
+  and 0 elsewhere, `cargo test -p pixelflow-intercept --lib`
+  3 passed / 0 failed, `cargo test -p pixelflow-present --lib`
+  8 passed / 0 failed). The full release suite did not run in
+  this VM instance: the restart wiped libpipewire-0.3-dev, so
+  `cargo build --release` fails in the libspa-sys build script
+  (libpipewire-0.3.pc not found). The `a11c5b6` 311 passed /
+  0 failed tally stays commit-recorded, not driver-verified.
+  Raw logs:
+  `goals/pixelflow/hidden_files/driver-e022c7e-verify-fmt.log`,
+  `driver-e022c7e-verify-build-release.log`,
+  `driver-clippy-fix-gate.log`,
+  `driver-clippy-fix-intercept-test.log`,
+  `driver-clippy-fix-present-test.log`.
   Baseline at `15a8fb6` verified by the docs worker (debug, 2026-11-10,
   same gates, exit 0): 217 passed / 0 failed — same total as
   `d2e057e` after the README/docs rewrite and the `run.rs`
@@ -708,6 +728,15 @@ Contour product algorithm; do not confuse the two.
   and `BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/14/include"`,
   or `libspa-sys` bindgen fails (`stdbool.h` not found). `/usr` does
   not survive VM replacements; nothing reinstalls these automatically.
+- Environment note (2026-11-11): a VM restart about 05:37 UTC wiped
+  the `/usr` dev libraries again (`libpipewire-0.3-dev`,
+  `libclang-dev`, `libgl1-mesa-dev`, `libsdl1.2-dev` absent;
+  `libx11-dev` and `xvfb` present). `cargo` lives at
+  `~/.cargo/bin` and is not on PATH in exec sessions, so gate
+  commands need `PATH="$HOME/.cargo/bin:$PATH"`. No apt or dpkg
+  installs per owner order, and no Nix is installed in this VM
+  instance, so the full release suite cannot run here until the
+  libraries return through an authorized route.
 - Never claim a test passed unless its command completed successfully.
   Never claim the application works end to end unless that path was
   actually exercised. A mock is not live capture. A GPU presenter is
@@ -868,6 +897,29 @@ a documented blocker.
   id `epx`, scales 2/4, bit-identical oracle, flat shift 0,
   release suite 306 passed / 0 failed, gate verified twice
   including on the rebased branch (see §8).
+- `a11c5b6`, Intercept: cover X11 image puts and 32-bit targets
+  (zsnes 0-frames fix; XPutImage/XShmPutImage interposition with
+  shadow accumulation and mask-based RGB8 conversion, second
+  32-bit shim, ELF-class shim selection; live under labwc: SDL
+  from 0 to 104 frames, 32-bit X11 from 0 to 109 frames; release
+  suite 311 passed / 0 failed, commit-recorded). Owner-authored,
+  on main.
+- `060e715`, Flake: multilib stdenv for the 32-bit shim build.
+  Owner-authored, on main.
+- `275b428`, CI: install X11, GL, SDL dev headers and Xvfb in
+  build-test. Owner-authored, on main.
+- `792e17c`, CLI: resolve test programs through PATH instead of
+  `/bin`. Owner-authored, on main.
+- `b80b993`, Flake: Xvfb and 32-bit X11 libraries in the dev
+  shell. Owner-authored, on main.
+- `e022c7e`, Intercept: re-probe the 32-bit toolchain when CC
+  changes (`cargo:rerun-if-env-changed=CC`). Owner-authored,
+  on main.
+- `be90b10`, Clippy: remove the 19 new diagnostics outside
+  contour.rs from `a11c5b6` (doc markdown, pass-by-value,
+  unwrap/expect in tests, a panic in a presenter test); gate
+  passes again with 30 known and 0 elsewhere. Driver run,
+  on main.
 
 ## 12. Remaining work and acceptance criteria
 
@@ -886,7 +938,9 @@ In execution order (§11 of the owner directive):
    run), at `91bf243` (292, release, fixtures exercised, gate
    verified independently by the coordinator run), at `951a0b2`
    (306, release, fixtures exercised, gate verified on the
-   rebased branch).
+   rebased branch), at `be90b10` (clippy gate and intercept and
+   present lib tests verified by the driver run; full release
+   suite blocked on the missing libpipewire-0.3-dev, see §8).
 2. Wayland verification report, done 2026-11-10 (all claims verified,
    mock test genuinely exercised under `dbus-run-session`, 5 gaps
    recorded). Wayland follow-up fixes — integrated at `ffff504`.
@@ -977,7 +1031,8 @@ In execution order (§11 of the owner directive):
    epx ported at `951a0b2` (bit-identical oracle, release suite
    306 passed / 0 failed). Nearest and bilinear are the
    repo's existing implementations, not reference ports. Next in
-   order: eagle. Correction 2026-11-10: the sentence in the
+   order: eagle, in flight under a driver-spawned port worker
+   (2026-11-11). Correction 2026-11-10: the sentence in the
    5240df4 record saying the owner is porting in sequence in
    `port/*` worktrees, so the driver spawns no port worker, was
    false on the record. The owner ported only PixelFlow himself,
