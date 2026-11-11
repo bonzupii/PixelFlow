@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn target_that_exits_at_once_is_an_error() {
         let result = run(RunOptions {
-            program: "/bin/true".to_string(),
+            program: "true".to_string(),
             args: vec![],
             scale: 4,
             algorithm: "contour".to_string(),
@@ -956,7 +956,7 @@ mod tests {
         ];
         let mut backend = FrameFeedBackend::new(frames);
         let mut launcher =
-            Launcher::spawn("/bin/sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
+            Launcher::spawn("sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
         let slot = Arc::new(FrameSlot::new());
         let exit = Arc::new(AtomicBool::new(false));
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1006,7 +1006,7 @@ mod tests {
     fn capture_error_ends_processing_with_an_error() -> Result<(), String> {
         let mut backend = FrameFeedBackend::failing(CaptureError::Disconnected);
         let mut launcher =
-            Launcher::spawn("/bin/sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
+            Launcher::spawn("sleep", &["30".to_string()]).map_err(|e| e.to_string())?;
         let slot = Arc::new(FrameSlot::new());
         let exit = Arc::new(AtomicBool::new(false));
         let result = run_processing(
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn target_exit_ends_processing_cleanly() -> Result<(), String> {
         let mut backend = FrameFeedBackend::new(vec![]);
-        let mut launcher = Launcher::spawn("/bin/true", &[]).map_err(|e| e.to_string())?;
+        let mut launcher = Launcher::spawn("true", &[]).map_err(|e| e.to_string())?;
         std::thread::sleep(Duration::from_millis(200));
         let slot = Arc::new(FrameSlot::new());
         let exit = Arc::new(AtomicBool::new(false));

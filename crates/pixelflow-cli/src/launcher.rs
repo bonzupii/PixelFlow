@@ -85,9 +85,9 @@ mod tests {
 
     #[test]
     fn true_exits_immediately() -> Result<(), String> {
-        let mut launcher = Launcher::spawn("/bin/true", &[])?;
+        let mut launcher = Launcher::spawn("true", &[])?;
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(launcher.exited(), "/bin/true has exited");
+        assert!(launcher.exited(), "true has exited");
         assert!(launcher.kill().is_ok(), "killing an exited child succeeds");
         Ok(())
     }
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn spawn_with_env_reaches_the_child() -> Result<(), String> {
         let mut launcher = Launcher::spawn_with_env(
-            "/bin/sh",
+            "sh",
             &[
                 "-c".to_string(),
                 "test \"$PIXELFLOW_TEST_VAR\" = sent".to_string(),
