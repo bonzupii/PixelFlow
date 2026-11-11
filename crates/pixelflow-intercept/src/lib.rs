@@ -542,18 +542,20 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+    fn write_temp(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
         let path = std::env::temp_dir().join(format!("pixelflow-intercept-test-{name}"));
-        let mut file = std::fs::File::create(&path).expect("test file is writable");
-        file.write_all(bytes).expect("test file is writable");
-        path
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| format!("the test file must be writable: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("the test file must be writable: {e}"))?;
+        Ok(path)
     }
 
     #[test]
-    fn elf_class_reads_both_classes() {
-        let path32 = write_temp("32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
-        let path64 = write_temp("64", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0]);
-        let path_text = write_temp("text", b"not an elf object");
+    fn elf_class_reads_both_classes() -> Result<(), String> {
+        let path32 = write_temp("32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0])?;
+        let path64 = write_temp("64", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0])?;
+        let path_text = write_temp("text", b"not an elf object")?;
         assert_eq!(elf_class(&path32), Some(1));
         assert_eq!(elf_class(&path64), Some(2));
         assert_eq!(elf_class(&path_text), None);
@@ -564,46 +566,54 @@ mod tests {
         std::fs::remove_file(path32).ok();
         std::fs::remove_file(path64).ok();
         std::fs::remove_file(path_text).ok();
+        Ok(())
     }
 
     #[test]
-    fn effective_target_uses_the_qemu_guest() {
+    fn effective_target_uses_the_qemu_guest() -> Result<(), String> {
         let qemu_path = std::env::temp_dir().join("qemu-i386-pixelflow-test");
-        std::fs::write(&qemu_path, b"fake emulator").expect("test file is writable");
-        let guest = write_temp("guest32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
+        std::fs::write(&qemu_path, b"fake emulator")
+            .map_err(|e| format!("the test file must be writable: {e}"))?;
+        let guest = write_temp("guest32", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0])?;
         let target = effective_target(
-            qemu_path.to_str().unwrap(),
+            qemu_path.to_str().ok_or("the qemu path must be UTF-8")?,
             &[guest.to_string_lossy().into_owned()],
         );
         assert_eq!(target, Some(guest.clone()));
         // Without a guest argument there is no target to match.
-        let target = effective_target(qemu_path.to_str().unwrap(), &[]);
+        let target = effective_target(
+            qemu_path.to_str().ok_or("the qemu path must be UTF-8")?,
+            &[],
+        );
         assert_eq!(target, None);
         // A plain program resolves to itself.
-        let target = effective_target(guest.to_str().unwrap(), &[]);
+        let target = effective_target(guest.to_str().ok_or("the guest path must be UTF-8")?, &[]);
         assert_eq!(target, Some(guest.clone()));
         std::fs::remove_file(qemu_path).ok();
         std::fs::remove_file(guest).ok();
+        Ok(())
     }
 
     #[test]
-    fn environment_for_selects_the_shim_by_elf_class() {
-        let mut backend = InterceptCapture::new().expect("socket binds");
-        let guest32 = write_temp("guest32b", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0]);
-        let result = backend.environment_for(guest32.to_str().unwrap(), &[]);
+    fn environment_for_selects_the_shim_by_elf_class() -> Result<(), String> {
+        let mut backend = InterceptCapture::new()
+            .map_err(|e| format!("the interception backend must bind: {e}"))?;
+        let guest32 = write_temp("guest32b", &[0x7f, b'E', b'L', b'F', 1, 0, 0, 0])?;
+        let result =
+            backend.environment_for(guest32.to_str().ok_or("the guest path must be UTF-8")?, &[]);
         if shim32_path().is_empty() {
             assert!(result.is_err());
         } else {
-            let env = result.expect("32-bit shim built");
+            let env = result?;
             assert_eq!(env[0].1, shim32_path());
         }
-        let guest64 = write_temp("guest64b", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0]);
+        let guest64 = write_temp("guest64b", &[0x7f, b'E', b'L', b'F', 2, 0, 0, 0])?;
         let env = backend
-            .environment_for(guest64.to_str().unwrap(), &[])
-            .expect("64-bit target");
+            .environment_for(guest64.to_str().ok_or("the guest path must be UTF-8")?, &[])?;
         assert_eq!(env[0].1, shim_path());
         std::fs::remove_file(guest32).ok();
         std::fs::remove_file(guest64).ok();
         backend.shutdown().ok();
+        Ok(())
     }
 }

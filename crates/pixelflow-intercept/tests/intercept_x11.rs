@@ -3,8 +3,8 @@
 //! These tests launch programs that present through X11 image puts
 //! instead of GL swap calls: `sdl_soft_target`, a real SDL 1.2
 //! program drawing into a 16-bit software surface and presenting
-//! with SDL_Flip, and `x11_target`, a real X11 program presenting
-//! with XShmPutImage or XPutImage. They are the zsnes case: a
+//! with `SDL_Flip`, and `x11_target`, a real X11 program presenting
+//! with `XShmPutImage` or `XPutImage`. They are the zsnes case: a
 //! software-rendered program the swap-only shim never saw, so it
 //! captured zero frames.
 //!
@@ -147,7 +147,7 @@ enum Intercept {
 fn collect_frames(
     program: &str,
     args: &[String],
-    intercept: Intercept,
+    intercept: &Intercept,
     display: &str,
     wait: Duration,
 ) -> Result<Vec<Frame>, String> {
@@ -326,9 +326,9 @@ fn intercepted_frames_arrive_from_a_real_sdl_soft_program() -> Result<(), String
     let target = dir.join("sdl_soft_target");
     compile_target("sdl_soft_target.c", &target, &sdl_flags()?)?;
     let frames = collect_frames(
-        target.to_str().unwrap(),
+        target.to_str().ok_or("the target path must be UTF-8")?,
         &["10".to_string()],
-        Intercept::On,
+        &Intercept::On,
         &display,
         Duration::from_secs(15),
     )?;
@@ -358,9 +358,9 @@ fn intercepted_frames_arrive_from_a_real_x11_program() -> Result<(), String> {
     // "plain" forces XPutImage instead of XShmPutImage, so this
     // test exercises the plain put path.
     let frames = collect_frames(
-        target.to_str().unwrap(),
+        target.to_str().ok_or("the target path must be UTF-8")?,
         &["10".to_string(), "plain".to_string()],
-        Intercept::On,
+        &Intercept::On,
         &display,
         Duration::from_secs(15),
     )?;
@@ -398,7 +398,7 @@ fn intercepted_frames_arrive_from_a_32_bit_x11_program() -> Result<(), String> {
     let frames = collect_frames(
         "qemu-i386",
         &[target.to_string_lossy().into_owned(), "10".to_string()],
-        Intercept::ForProgram,
+        &Intercept::ForProgram,
         &display,
         Duration::from_secs(20),
     )?;
@@ -421,9 +421,9 @@ fn no_frames_without_interception() -> Result<(), String> {
     let target = dir.join("sdl_soft_target");
     compile_target("sdl_soft_target.c", &target, &sdl_flags()?)?;
     let frames = collect_frames(
-        target.to_str().unwrap(),
+        target.to_str().ok_or("the target path must be UTF-8")?,
         &["10".to_string()],
-        Intercept::Off,
+        &Intercept::Off,
         &display,
         Duration::from_secs(3),
     )?;

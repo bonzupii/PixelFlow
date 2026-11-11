@@ -662,12 +662,10 @@ mod tests {
         slot.publish(frame);
         assert!(presenter.take_latest(), "the published frame is taken");
         assert!(!presenter.take_latest(), "the slot is empty after taking");
-        match presenter.latest.as_ref() {
-            Some((width, height, rgba)) => {
-                assert_eq!((*width, *height), (2, 1));
-                assert_eq!(rgba, &vec![9, 8, 7, 255, 6, 5, 4, 255]);
-            }
-            None => panic!("take_latest stored no frame"),
+        assert!(presenter.latest.is_some(), "take_latest stored no frame");
+        if let Some((width, height, rgba)) = presenter.latest.as_ref() {
+            assert_eq!((*width, *height), (2, 1));
+            assert_eq!(rgba, &vec![9, 8, 7, 255, 6, 5, 4, 255]);
         }
         Ok(())
     }
