@@ -29,7 +29,10 @@
           libXrandr
           libxcb
           vulkan-loader
+          xorg.xorgserver
           zsnes
+          pkgsi686Linux.libX11
+          pkgsi686Linux.libXext
         ];
 
         LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
