@@ -21,6 +21,7 @@ fn builtin_registry_holds_only_the_cpu_algorithms() {
             "bicubic",
             "lanczos3",
             "scale2x",
+            "epx",
             "pixelflow"
         ]
     );
@@ -43,6 +44,7 @@ fn gpu_nearest_registers_and_describes_through_the_registry() {
             "bicubic",
             "lanczos3",
             "scale2x",
+            "epx",
             "pixelflow",
             "nearest-gpu"
         ]
@@ -75,6 +77,7 @@ fn gpu_nearest_lookup_fails_with_the_available_ids() {
                     "bicubic",
                     "lanczos3",
                     "scale2x",
+                    "epx",
                     "pixelflow"
                 ]
             );

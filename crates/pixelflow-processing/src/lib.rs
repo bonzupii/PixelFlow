@@ -12,6 +12,7 @@ pub mod registry;
 pub use algorithms::bicubic::{Bicubic, BicubicAlgorithm};
 pub use algorithms::bilinear::{Bilinear, BilinearAlgorithm};
 pub use algorithms::contour::{Contour, ContourAlgorithm, LimitedContour};
+pub use algorithms::epx::{Epx, EpxAlgorithm};
 pub use algorithms::lanczos3::{Lanczos3, Lanczos3Algorithm};
 pub use algorithms::nearest::{Nearest, NearestAlgorithm};
 pub use algorithms::pixelflow::{PixelFlow, PixelFlowAlgorithm};
