@@ -10,7 +10,7 @@
       pkgs = import nixpkgs { inherit system; };
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
+      devShells.${system}.default = (pkgs.mkShell.override { stdenv = pkgs.multiStdenv; }) {
         packages = with pkgs; [
           cargo
           rustc
